@@ -1,143 +1,142 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>GrammarGuard</title>
-  <link rel="stylesheet" href="src/popup.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&family=Lora:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="src/popup.css"/>
 </head>
 <body>
-  <div class="app">
+<div class="layout">
 
-    <!-- Header -->
-    <header class="header">
-      <div class="logo">
-        <div class="logo-icon">
-          <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-            <path d="M3 6h16M3 11h10M3 16h13" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
-            <circle cx="17.5" cy="15.5" r="3.5" fill="var(--accent)" stroke="var(--bg-card)" stroke-width="1.5"/>
-            <path d="M16 15.5l1 1 1.5-1.5" stroke="white" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </div>
-        <span class="logo-name">GrammarGuard</span>
+  <!-- ── Sidebar ── -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-icon">
+        <svg width="20" height="20" viewBox="0 0 22 22" fill="none">
+          <path d="M3 6h16M3 11h10M3 16h13" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+        </svg>
       </div>
-      <div class="header-actions">
-        <button class="icon-btn" id="settingsBtn" title="Settings">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="3"/>
-            <path d="M12 2v2M12 20v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M2 12h2M20 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
-          </svg>
-        </button>
-      </div>
-    </header>
+      <span class="brand-name">GrammarGuard</span>
+    </div>
 
-    <!-- Toggle Bar -->
-    <div class="toggle-bar">
-      <div class="toggle-wrap">
-        <span class="toggle-label">Check this page</span>
-        <label class="toggle-switch">
-          <input type="checkbox" id="enableToggle" checked />
-          <span class="slider"></span>
-        </label>
-      </div>
-      <div class="lang-select-wrap">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20"/></svg>
-        <select id="languageSelect">
-          <option value="auto">Auto-detect</option>
-          <option value="en-US">English (US)</option>
-          <option value="en-GB">English (UK)</option>
-          <option value="en-AU">English (AU)</option>
-          <option value="de-DE">German</option>
-          <option value="fr">French</option>
-          <option value="es">Spanish</option>
-          <option value="pt-BR">Portuguese (BR)</option>
-          <option value="pt-PT">Portuguese (PT)</option>
-          <option value="nl">Dutch</option>
-          <option value="pl">Polish</option>
-          <option value="it">Italian</option>
-          <option value="ru">Russian</option>
-          <option value="zh-CN">Chinese</option>
-          <option value="ja">Japanese</option>
-        </select>
+    <!-- Language -->
+    <div class="sidebar-section">
+      <div class="section-label">Language</div>
+      <select id="langSelect">
+        <option value="auto">Auto-detect</option>
+        <option value="en-US" selected>English (US)</option>
+        <option value="en-GB">English (UK)</option>
+        <option value="en-AU">English (AU)</option>
+        <option value="de-DE">German</option>
+        <option value="fr">French</option>
+        <option value="es">Spanish</option>
+        <option value="pt-BR">Portuguese (BR)</option>
+        <option value="it">Italian</option>
+        <option value="nl">Dutch</option>
+        <option value="pl">Polish</option>
+        <option value="ru">Russian</option>
+      </select>
+    </div>
+
+    <!-- Theme -->
+    <div class="sidebar-section">
+      <div class="section-label">Theme</div>
+      <div class="theme-grid">
+        <button class="theme-btn active" data-theme="light"     title="Light">Light</button>
+        <button class="theme-btn"        data-theme="dark"      title="Dark">Dark</button>
+        <button class="theme-btn"        data-theme="sepia"     title="Sepia">Sepia</button>
+        <button class="theme-btn"        data-theme="contrast"  title="High Contrast">Hi-Con</button>
       </div>
     </div>
 
-    <!-- Status Bar -->
-    <div class="status-bar" id="statusBar">
-      <div class="status-idle" id="statusIdle">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-        <span>Click "Check Now" to analyze text</span>
-      </div>
-      <div class="status-checking hidden" id="statusChecking">
-        <div class="spinner"></div>
-        <span>Checking grammar…</span>
-      </div>
-      <div class="status-ok hidden" id="statusOk">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
-        <span>No issues found!</span>
-      </div>
-      <div class="status-error hidden" id="statusError">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-        <span id="statusErrorMsg">API error</span>
+    <!-- Stats -->
+    <div class="sidebar-section" id="statsSection" style="display:none">
+      <div class="section-label">Results</div>
+      <div class="stats-grid">
+        <div class="stat-box red">   <span id="nErrors">0</span>  <label>Spelling</label></div>
+        <div class="stat-box amber"> <span id="nGrammar">0</span> <label>Grammar</label></div>
+        <div class="stat-box blue">  <span id="nStyle">0</span>   <label>Style</label></div>
+        <div class="stat-box gray">  <span id="nTotal">0</span>   <label>Total</label></div>
       </div>
     </div>
 
-    <!-- Summary Stats -->
-    <div class="stats-row hidden" id="statsRow">
-      <div class="stat-pill red">
-        <span class="stat-num" id="statErrors">0</span>
-        <span class="stat-lbl">Errors</span>
-      </div>
-      <div class="stat-pill yellow">
-        <span class="stat-num" id="statWarnings">0</span>
-        <span class="stat-lbl">Warnings</span>
-      </div>
-      <div class="stat-pill blue">
-        <span class="stat-num" id="statStyle">0</span>
-        <span class="stat-lbl">Style</span>
-      </div>
-      <div class="stat-pill gray">
-        <span class="stat-num" id="statTotal">0</span>
-        <span class="stat-lbl">Total</span>
+    <!-- Filter -->
+    <div class="sidebar-section" id="filterSection" style="display:none">
+      <div class="section-label">Filter</div>
+      <div class="filter-btns">
+        <button class="fbtn active" data-f="all">All</button>
+        <button class="fbtn" data-f="spelling">Spelling</button>
+        <button class="fbtn" data-f="grammar">Grammar</button>
+        <button class="fbtn" data-f="style">Style</button>
       </div>
     </div>
 
-    <!-- Filter Tabs -->
-    <div class="filter-tabs hidden" id="filterTabs">
-      <button class="tab active" data-filter="all">All</button>
-      <button class="tab" data-filter="misspelling">Spelling</button>
-      <button class="tab" data-filter="grammar">Grammar</button>
-      <button class="tab" data-filter="style">Style</button>
-    </div>
-
-    <!-- Issues List -->
-    <div class="issues-list" id="issuesList">
-      <div class="empty-state" id="emptyState">
-        <div class="empty-icon">
-          <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".35"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-        </div>
-        <p>Run a check to see<br/>grammar &amp; spelling issues</p>
-      </div>
-    </div>
-
-    <!-- Action Buttons -->
-    <div class="actions">
-      <button class="btn btn-primary" id="checkBtn">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 12l2 2 4-4"/><path d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9c1.95 0 3.75.62 5.22 1.67"/></svg>
+    <!-- Actions -->
+    <div class="sidebar-actions">
+      <button class="btn-primary" id="checkBtn">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/>
+        </svg>
         Check Now
       </button>
-      <button class="btn btn-ghost" id="clearBtn">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
-        Clear
-      </button>
+      <button class="btn-ghost" id="clearBtn">Clear</button>
     </div>
 
-    <!-- Footer -->
-    <footer class="footer">
-      Powered by <a href="https://languagetool.org" target="_blank">LanguageTool API</a>
-    </footer>
+    <div class="sidebar-footer">
+      Powered by <a href="https://languagetool.org" target="_blank">LanguageTool</a>
+      &nbsp;·&nbsp;
+      <a href="#" id="settingsLink">Settings</a>
+    </div>
+  </aside>
 
-  </div>
-  <script src="src/popup.js"></script>
+  <!-- ── Main ── -->
+  <main class="main">
+
+    <!-- Top bar -->
+    <div class="topbar">
+      <div id="statusBar" class="status-idle">
+        <span class="status-dot"></span>
+        <span id="statusMsg">Ready — paste text and click Check Now</span>
+      </div>
+      <div class="topbar-right">
+        <span id="charCount" class="char-count">0 chars</span>
+        <button class="btn-sm" id="clearTextBtn">Clear text</button>
+      </div>
+    </div>
+
+    <!-- Editor -->
+    <div class="editor-area">
+      <div class="editor-wrap" id="editorWrap">
+        <div id="mirror" class="mirror" aria-hidden="true"></div>
+        <textarea id="editor"
+          placeholder="Paste or type your text here…&#10;&#10;After clicking Check Now, click any underlined word to see suggestions."
+          spellcheck="false"></textarea>
+      </div>
+    </div>
+
+    <!-- Issues panel -->
+    <div class="issues-panel">
+      <div id="emptyState" class="empty-state">
+        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity=".15">
+          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="16" y1="13" x2="8" y2="13"/>
+          <line x1="16" y1="17" x2="8" y2="17"/>
+        </svg>
+        <p>Paste text and click <strong>Check Now</strong></p>
+        <p class="empty-sub">Click any underlined word to see suggestions</p>
+      </div>
+      <div id="issuesList"></div>
+    </div>
+
+    <!-- Inline tooltip (click-on-underline) -->
+    <div id="inlineTooltip" class="inline-tooltip hidden"></div>
+
+  </main>
+</div>
+<script src="src/popup.js"></script>
 </body>
 </html>

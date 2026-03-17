@@ -1,675 +1,921 @@
-// GrammarGuard content.js — clean rewrite
+// content.js - GrammarGuard inline editor support
 (function () {
   'use strict';
-  if (window.__gg) return;
-  window.__gg = true;
 
-  let language = 'auto';
-  let dictionary = new Set(); // lowercase words added by user
-  const state = new Map();    // field → { matches:[], badge:null }
+  const state = {
+    settings: {
+      enabled: true,
+      language: 'auto',
+      autoCheck: false,
+      checkDelay: 1500,
+      checkSpelling: true,
+      checkGrammar: true,
+      checkStyle: true,
+      checkPunctuation: true,
+      showBadge: true,
+      showToasts: true,
+      ignoredSites: []
+    },
+    activeSession: null,
+    sessions: new WeakMap(),
+    overlay: null,
+    overlayContent: null,
+    badge: null,
+    tooltip: null,
+    syncScheduled: false
+  };
 
-  // ── Boot ─────────────────────────────────────────────────────────
-  chrome.storage.local.get(['enabled', 'language', 'personalDict'], d => {
-    if (d.enabled === false) return;
-    language = d.language || 'auto';
-    loadDict(d.personalDict);
-    injectCSS();
-    if (document.readyState === 'complete') scanAll();
-    else window.addEventListener('load', scanAll, { once: true });
-    new MutationObserver(debounce(() => {
-      findFields().filter(f => !state.has(f)).forEach(f => checkField(f));
-    }, 800)).observe(document.body, { childList: true, subtree: true });
-  });
+  const EDITABLE_INPUT_TYPES = new Set(['', 'email', 'search', 'tel', 'text', 'url']);
 
-  chrome.storage.onChanged.addListener(changes => {
-    if (changes.personalDict) loadDict(changes.personalDict.newValue);
-  });
+  init();
 
-  // personalDict is stored as an array of strings
-  function loadDict(val) {
-    if (Array.isArray(val)) {
-      dictionary = new Set(val.map(w => w.toLowerCase().trim()).filter(Boolean));
-    } else if (typeof val === 'string') {
-      dictionary = new Set(val.split('\n').map(w => w.toLowerCase().trim()).filter(Boolean));
-    }
+  async function init() {
+    state.settings = await loadSettings();
+    createUi();
+    bindGlobalEvents();
   }
 
-  function inDict(word) {
-    return dictionary.has((word || '').toLowerCase().trim());
-  }
+  function createUi() {
+    state.overlay = document.createElement('div');
+    state.overlay.className = 'gg-overlay hidden';
+    state.overlayContent = document.createElement('div');
+    state.overlayContent.className = 'gg-overlay-content';
+    state.overlay.appendChild(state.overlayContent);
 
-  function filterDict(matches, text) {
-    return matches.filter(m => {
-      if (m.rule?.issueType !== 'misspelling') return true;
-      const word = text.slice(m.offset, m.offset + m.length);
-      return !inDict(word);
+    state.badge = document.createElement('button');
+    state.badge.type = 'button';
+    state.badge.className = 'gg-badge hidden';
+    state.badge.addEventListener('mousedown', event => {
+      event.preventDefault();
+      event.stopPropagation();
     });
-  }
-
-  // ── CSS ───────────────────────────────────────────────────────────
-  function injectCSS() {
-    if (document.getElementById('gg-css')) return;
-    const s = document.createElement('style');
-    s.id = 'gg-css';
-    s.textContent = `
-      @keyframes gg-spin { to { transform:rotate(360deg) } }
-      @keyframes gg-pop  { from{opacity:0;transform:scale(.75)} to{opacity:1;transform:scale(1)} }
-      .gg-wrap { display:inline-block !important; position:relative !important; }
-      .gg-mirror {
-        position:absolute !important; top:0 !important; left:0 !important;
-        pointer-events:none !important; z-index:0 !important;
-        overflow:hidden !important;
-        color:transparent !important;
-        -webkit-text-fill-color:transparent !important;
-        background:white !important;
+    state.badge.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (state.activeSession) {
+        state.activeSession.element.focus();
+        runCheck(state.activeSession, true);
       }
-      .gg-field-wrapped {
-        position:relative !important; z-index:1 !important;
-        background:transparent !important;
-      }
-      .gg-mirror mark {
-        background:transparent !important;
-        color:transparent !important;
-        -webkit-text-fill-color:transparent !important;
-        padding:0; margin:0; border-radius:0;
-      }
-      .gg-mirror mark.gg-spell   { border-bottom:2px solid #e53935 }
-      .gg-mirror mark.gg-grammar { border-bottom:2px solid #f57c00 }
-      .gg-mirror mark.gg-style   { border-bottom:2px dashed #1976d2 }
-      .gg-badge {
-        position:fixed !important; z-index:2147483647 !important;
-        display:inline-flex; align-items:center; gap:4px;
-        padding:3px 8px 3px 6px; border-radius:999px;
-        font:700 11px/1 system-ui,sans-serif; white-space:nowrap;
-        user-select:none; box-shadow:0 1px 8px rgba(0,0,0,.18),0 0 0 1px rgba(0,0,0,.07);
-        background:#fff; animation:gg-pop .15s ease forwards; transition:filter .1s;
-      }
-      .gg-badge.clickable { pointer-events:all !important; cursor:pointer }
-      .gg-badge.clickable:hover { filter:brightness(.92) }
-      .gg-spin {
-        display:inline-block; width:9px; height:9px; flex-shrink:0;
-        border:1.8px solid rgba(68,87,232,.2); border-top-color:#4457e8;
-        border-radius:50%; animation:gg-spin .7s linear infinite;
-      }
-      .gg-panel {
-        position:fixed !important; z-index:2147483647 !important;
-        width:320px; max-height:390px; overflow-y:auto;
-        background:#fff; border:1px solid #dde0ea; border-radius:12px;
-        box-shadow:0 4px 24px rgba(0,0,0,.13),0 1px 4px rgba(0,0,0,.07);
-        font:13px/1.4 system-ui,sans-serif; color:#1a1d2e;
-      }
-      .gg-panel::-webkit-scrollbar{width:4px}
-      .gg-panel::-webkit-scrollbar-thumb{background:#dde0ea;border-radius:2px}
-      .gg-panel-head {
-        display:flex; align-items:center; justify-content:space-between;
-        padding:11px 13px; border-bottom:1px solid #eef0f6;
-        background:#f8f9fc; position:sticky; top:0;
-        font-weight:700; font-size:13px;
-      }
-      .gg-count { background:rgba(217,48,37,.1);color:#d93025;border-radius:99px;padding:1px 8px;font-size:11px;font-weight:600;margin-left:6px }
-      .gg-close { background:none;border:none;color:#9299b0;cursor:pointer;font-size:16px;padding:0 4px;line-height:1 }
-      .gg-row { padding:10px 13px; border-bottom:1px solid #f0f2f7 }
-      .gg-row:last-child { border-bottom:none }
-      .gg-row-top { display:flex;align-items:flex-start;gap:7px;margin-bottom:5px }
-      .gg-dot { display:inline-block;width:7px;height:7px;border-radius:50%;flex-shrink:0;margin-top:4px }
-      .gg-msg { flex:1;font-size:12.5px;color:#2a2d40;line-height:1.45 }
-      .gg-x { background:none;border:none;color:#9299b0;cursor:pointer;font-size:12px;padding:0 3px }
-      .gg-ctx { font:10.5px/1.4 monospace;color:#6b7599;margin-bottom:7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap }
-      .gg-ctx mark { border-radius:2px;padding:0 2px }
-      .gg-sugs { display:flex;flex-wrap:wrap;gap:5px;margin-bottom:6px }
-      .gg-sug { font:11px monospace;padding:3px 9px;border-radius:4px;cursor:pointer;background:rgba(68,87,232,.07);border:1px solid rgba(68,87,232,.2);color:#4457e8 }
-      .gg-sug:hover { background:#4457e8;color:#fff;border-color:#4457e8 }
-      .gg-dict-btn { display:inline-flex;align-items:center;gap:5px;background:none;border:1px solid #dde0ea;border-radius:5px;padding:3px 9px;font:12px system-ui,sans-serif;color:#5a6080;cursor:pointer;transition:all .12s }
-      .gg-dict-btn:hover:not(:disabled) { background:#f0f4ff;border-color:#4457e8;color:#4457e8 }
-      .gg-dict-btn:disabled { cursor:default;opacity:.6 }
-      .gg-toast {
-        position:fixed !important; bottom:20px; left:50%;
-        transform:translateX(-50%) translateY(8px); z-index:2147483647 !important;
-        background:#fff; border:1px solid #dde0ea; border-radius:8px;
-        padding:8px 16px; font:13px system-ui,sans-serif; color:#1a1d2e;
-        box-shadow:0 4px 16px rgba(0,0,0,.1); opacity:0;
-        transition:opacity .25s,transform .25s; pointer-events:none; white-space:nowrap;
-      }
-    `;
-    document.head.appendChild(s);
-  }
-
-  // ── Field discovery ──────────────────────────────────────────────
-  function findFields() {
-    const out = [];
-    document.querySelectorAll(
-      'textarea,input[type=text],input[type=search],input:not([type]),[contenteditable=true]'
-    ).forEach(el => {
-      if (el.offsetWidth > 30 && el.offsetHeight > 10 && !el.disabled && !el.readOnly)
-        out.push(el);
     });
-    return out;
+
+    state.tooltip = document.createElement('div');
+    state.tooltip.className = 'gg-tooltip hidden';
+
+    document.documentElement.appendChild(state.overlay);
+    document.documentElement.appendChild(state.badge);
+    document.documentElement.appendChild(state.tooltip);
   }
 
-  function getText(el) {
-    return (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')
-      ? (el.value || '') : (el.innerText || '');
-  }
+  function bindGlobalEvents() {
+    document.addEventListener('focusin', onFocusIn, true);
+    document.addEventListener('focusout', onFocusOut, true);
+    document.addEventListener('input', onInput, true);
+    document.addEventListener('click', onClick, true);
+    document.addEventListener('dblclick', onDoubleClick, true);
+    document.addEventListener('selectionchange', onSelectionChange, true);
+    window.addEventListener('scroll', scheduleSync, true);
+    window.addEventListener('resize', scheduleSync, true);
 
-  // ── Scan ─────────────────────────────────────────────────────────
-  function scanAll() {
-    // Start all fields immediately — background.js handles one request at a time
-    findFields().forEach(f => checkField(f));
-  }
-
-  async function checkField(field) {
-    if (!state.has(field)) state.set(field, { matches: [], badge: null });
-    const text = getText(field).trim();
-    if (text.length < 10) { attachBlur(field); return; }
-    setBadge(field, 'checking');
-    try {
-      const raw = await bgCheck(text);
-      const matches = filterDict(raw, text);
-      state.get(field).matches = matches;
-      setBadge(field, matches.length > 0 ? 'errors' : 'ok', matches);
-      applyMirror(field, text, matches);
-      attachBlur(field);
-      attachInputSync(field);
-    } catch (e) {
-      console.warn('[GrammarGuard] check failed:', e.message, e.stack);
-      setBadge(field, 'failed');
-    }
-  }
-
-  // ── Background API ────────────────────────────────────────────────
-  // Pings the service worker first to wake it (Chrome suspends it after
-  // ~30s idle, causing sendMessage callbacks to never fire).
-  // Hard 25s timeout so we never stay stuck on 'Checking...'.
-  function bgCheck(text) {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-
-      const timer = setTimeout(() => {
-        if (!settled) { settled = true; reject(new Error('Timed out — try again')); }
-      }, 25000);
-
-      function sendCheck() {
-        chrome.runtime.sendMessage(
-          { action: 'checkTextChunked', text: text.slice(0, 6000), language },
-          r => {
-            clearTimeout(timer);
-            if (settled) return;
-            settled = true;
-            if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
-            if (r && r.success) return resolve(r.matches || []);
-            reject(new Error((r && r.error) || 'no response'));
+    chrome.storage.onChanged.addListener(changes => {
+      let needsReload = false;
+      for (const key of Object.keys(changes)) {
+        if (key in state.settings) {
+          needsReload = true;
+          break;
+        }
+      }
+      if (needsReload) {
+        loadSettings().then(settings => {
+          state.settings = settings;
+          if (state.activeSession) {
+            state.activeSession.dictionary = new Set(settings.personalDict);
+            scheduleSync();
           }
-        );
+        });
       }
+    });
 
-      // Wake the service worker, then send the real request
-      chrome.runtime.sendMessage({ action: 'ping' }, () => {
-        void chrome.runtime.lastError; // suppress 'no listener' warning on ping
-        if (!settled) sendCheck();
-      });
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message.action === 'showContextResult') {
+        showToast(`Selection check found ${(message.matches || []).length} issues.`);
+        sendResponse({ ok: true });
+      }
     });
   }
 
-  // ── Mirror overlay ────────────────────────────────────────────────
-  function applyMirror(field, text, matches) {
-    if (field.contentEditable === 'true') {
-      applyContentEditable(field, matches);
+  async function onFocusIn(event) {
+    const element = getEditableTarget(event.target);
+    if (!element || isIgnoredSite() || !state.settings.enabled) {
       return;
     }
-    let wrapper = field._ggWrapper;
-    let mirror  = field._ggMirror;
 
-    if (!wrapper) {
-      wrapper = document.createElement('div');
-      wrapper.className = 'gg-wrap';
-      const cs = window.getComputedStyle(field);
-      wrapper.style.width  = field.offsetWidth  + 'px';
-      wrapper.style.height = field.offsetHeight + 'px';
-      if (cs.display === 'block') wrapper.style.display = 'block';
-      field.parentNode.insertBefore(wrapper, field);
-      wrapper.appendChild(field);
-      field._ggWrapper = wrapper;
+    const session = getSession(element);
+    setActiveSession(session);
 
-      mirror = document.createElement('div');
-      mirror.className = 'gg-mirror';
-      wrapper.insertBefore(mirror, field);
-      field._ggMirror = mirror;
-
-      const props = ['fontFamily','fontSize','fontWeight','fontStyle','lineHeight',
-        'letterSpacing','wordSpacing','textTransform','textIndent',
-        'paddingTop','paddingRight','paddingBottom','paddingLeft',
-        'borderTopWidth','borderRightWidth','borderBottomWidth','borderLeftWidth','boxSizing'];
-      props.forEach(p => mirror.style[p] = cs[p]);
-      mirror.style.borderStyle = 'solid';
-      mirror.style.borderColor = 'transparent';
-
-      const isInput = field.tagName === 'INPUT';
-      mirror.style.whiteSpace = isInput ? 'pre' : 'pre-wrap';
-      mirror.style.wordWrap   = isInput ? 'normal' : 'break-word';
-      mirror.style.overflowX  = 'hidden';
-      mirror.style.overflowY  = 'hidden';
-
-      field._ggOrigBg = field.style.background || '';
-      field.classList.add('gg-field-wrapped');
-      field.style.caretColor = cs.color;
+    if (session.type === 'plain') {
+      syncPlainOverlay(session);
+    } else {
+      clearOverlay();
     }
 
-    mirror.style.width  = field.offsetWidth  + 'px';
-    mirror.style.height = field.offsetHeight + 'px';
-    updateMirrorHTML(mirror, text, matches);
-    mirror.scrollTop  = field.scrollTop;
-    mirror.scrollLeft = field.scrollLeft;
-  }
-
-  function updateMirrorHTML(mirror, text, matches) {
-    const len = text.length;
-    const valid = matches
-      .filter(m => {
-        const o = Number(m.offset), l = Number(m.length);
-        return Number.isFinite(o) && Number.isFinite(l) && o >= 0 && l > 0 && o + l <= len;
-      })
-      .sort((a, b) => a.offset - b.offset);
-
-    let html = '', cursor = 0;
-    for (const m of valid) {
-      if (m.offset < cursor) continue;
-      html += escHtml(text.slice(cursor, m.offset));
-      const cls = getClass(m);
-      const mc  = { spelling:'gg-spell', grammar:'gg-grammar', style:'gg-style' }[cls] || 'gg-grammar';
-      html += `<mark class="${mc}">${escHtml(text.slice(m.offset, m.offset + m.length))}</mark>`;
-      cursor = m.offset + m.length;
+    if (state.settings.autoCheck) {
+      scheduleCheck(session, true);
+    } else {
+      updateBadge(session);
     }
-    html += escHtml(text.slice(cursor));
-    mirror.innerHTML = html + '\u200b';
   }
 
-  function removeMirror(field) {
-    if (!field._ggWrapper) return;
-    const w = field._ggWrapper;
-    if (w.parentNode) { w.parentNode.insertBefore(field, w); w.remove(); }
-    field._ggWrapper = null;
-    field._ggMirror  = null;
-    field.classList.remove('gg-field-wrapped');
-    field.style.removeProperty('caret-color');
-    if (field._ggOrigBg !== undefined) { field.style.background = field._ggOrigBg; delete field._ggOrigBg; }
-  }
+  function onFocusOut(event) {
+    if (!state.activeSession) {
+      return;
+    }
 
-  // ── ContentEditable highlights ────────────────────────────────────
-  function applyContentEditable(field, matches) {
-    field.querySelectorAll('.gg-hl').forEach(s => s.replaceWith(document.createTextNode(s.textContent)));
-    field.normalize();
-    if (!matches.length) return;
-    const plainLen = field.innerText.length;
-    const valid = matches.filter(m =>
-      Number.isFinite(m.offset) && Number.isFinite(m.length) &&
-      m.offset >= 0 && m.length > 0 && m.offset + m.length <= plainLen
-    );
-    [...valid].sort((a, b) => b.offset - a.offset).forEach(m => injectSpan(field, m));
-  }
+    const related = event.relatedTarget;
+    if (related && (state.tooltip.contains(related) || state.badge.contains(related))) {
+      return;
+    }
 
-  function injectSpan(root, match) {
-    // Hard-validate offset/length before any DOM touching
-    const o = Number(match.offset), l2 = Number(match.length);
-    if (!Number.isFinite(o) || !Number.isFinite(l2) || o < 0 || l2 <= 0) return;
-
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    let node, n = 0;
-    while ((node = walker.nextNode())) {
-      const l = node.textContent.length;
-      if (n + l > o) {
-        const lo = o - n;
-        // Must fit entirely within this single text node
-        if (lo < 0 || lo + l2 > l) { n += l; continue; }
-        const cls   = getClass(match);
-        const color = { spelling:'#e53935', grammar:'#f57c00', style:'#1976d2' }[cls];
-        const span  = document.createElement('span');
-        span.className = 'gg-hl';
-        span.style.cssText = `border-bottom:2px ${cls === 'style' ? 'dashed' : 'solid'} ${color}`;
-        span.title = match.message;
-        span.textContent = node.textContent.slice(lo, lo + l2);
-        // splitText is safe because we verified lo < l and lo + l2 <= l above
-        const after = node.splitText(lo);
-        after.textContent = after.textContent.slice(l2);
-        node.parentNode.insertBefore(span, after);
+    window.setTimeout(() => {
+      const session = state.activeSession;
+      const active = document.activeElement;
+      if (!session) {
         return;
       }
-      n += l;
-    }
-  }
-
-  // ── Input sync ────────────────────────────────────────────────────
-  function attachInputSync(field) {
-    if (field._ggSync) return;
-    field._ggSync = true;
-    field.addEventListener('input', () => {
-      const s = state.get(field);
-      if (s && field._ggMirror) {
-        updateMirrorHTML(field._ggMirror, getText(field), s.matches);
-        field._ggMirror.scrollTop  = field.scrollTop;
-        field._ggMirror.scrollLeft = field.scrollLeft;
+      if (active && (state.tooltip.contains(active) || state.badge.contains(active))) {
+        return;
       }
-    });
-    field.addEventListener('scroll', () => {
-      if (field._ggMirror) {
-        field._ggMirror.scrollTop  = field.scrollTop;
-        field._ggMirror.scrollLeft = field.scrollLeft;
+
+      if (!active || getEditableTarget(active) !== session.element) {
+        hideTooltip();
+        if (session.type === 'plain') {
+          clearOverlay();
+        }
+        state.badge.classList.add('hidden');
+        state.activeSession = null;
       }
-    }, { passive: true });
-  }
-
-  // ── Badge ─────────────────────────────────────────────────────────
-  function setBadge(field, status, matches = []) {
-    const s = state.get(field);
-    if (!s) return;
-    if (s.badge) { s.badge.remove(); s.badge = null; }
-    if (status === 'none') return;
-
-    const b = document.createElement('div');
-    b.className = 'gg-badge';
-
-    if (status === 'checking') {
-      b.style.color = '#4457e8';
-      b.innerHTML = '<span class="gg-spin"></span><span>Checking\u2026</span>';
-    } else if (status === 'ok') {
-      b.style.color = '#1a9e52';
-      b.innerHTML = '\u2713 <span>No issues</span>';
-      setTimeout(() => {
-        b.style.transition = 'opacity .4s';
-        b.style.opacity = '0';
-        setTimeout(() => { b.remove(); if (s.badge === b) s.badge = null; }, 420);
-      }, 4000);
-    } else if (status === 'errors') {
-      const hasReal = matches.some(m => getClass(m) !== 'style');
-      b.style.color = hasReal ? '#d93025' : '#1a7fc4';
-      b.classList.add('clickable');
-      const icon = hasReal
-        ? `<svg width="10" height="10" viewBox="0 0 10 10" fill="none"><circle cx="5" cy="5" r="4.5" fill="rgba(217,48,37,.12)" stroke="#d93025" stroke-width="1"/><line x1="5" y1="3" x2="5" y2="6" stroke="#d93025" stroke-width="1.2" stroke-linecap="round"/><circle cx="5" cy="7.5" r=".6" fill="#d93025"/></svg>`
-        : `<svg width="10" height="10" viewBox="0 0 10 10" fill="none"><circle cx="5" cy="5" r="4.5" fill="rgba(26,127,196,.12)" stroke="#1a7fc4" stroke-width="1"/><line x1="5" y1="3" x2="5" y2="6" stroke="#1a7fc4" stroke-width="1.2" stroke-linecap="round"/><circle cx="5" cy="7.5" r=".6" fill="#1a7fc4"/></svg>`;
-      b.innerHTML = icon + `<span>${matches.length} issue${matches.length !== 1 ? 's' : ''}</span>`;
-      b.addEventListener('click', e => { e.stopPropagation(); showPanel(field, s.matches); });
-    } else if (status === 'failed') {
-      b.style.color = '#c47a00';
-      b.innerHTML = '\u26a0 <span>Failed</span>';
-    }
-
-    document.body.appendChild(b);
-    s.badge = b;
-    placeBadge(b, field);
-  }
-
-  function placeBadge(b, field) {
-    const r  = field.getBoundingClientRect();
-    const bw = b.offsetWidth  || 90;
-    const bh = b.offsetHeight || 22;
-    b.style.top  = Math.max(4, r.bottom - bh - 6) + 'px';
-    b.style.left = Math.max(4, Math.min(r.right - bw - 6, window.innerWidth - bw - 8)) + 'px';
-  }
-
-  window.addEventListener('scroll', debounce(() => {
-    state.forEach((s, f) => { if (s.badge) placeBadge(s.badge, f); });
-  }, 50), { passive: true });
-
-  window.addEventListener('resize', debounce(() => {
-    state.forEach((s, f) => {
-      if (s.badge) placeBadge(s.badge, f);
-      if (f._ggMirror && s.matches.length) applyMirror(f, getText(f), s.matches);
-    });
-  }, 100), { passive: true });
-
-  // ── Panel ─────────────────────────────────────────────────────────
-  function showPanel(field, matches) {
-    document.querySelectorAll('.gg-panel').forEach(p => p.remove());
-    const panel = document.createElement('div');
-    panel.className = 'gg-panel';
-
-    const head = document.createElement('div');
-    head.className = 'gg-panel-head';
-    head.innerHTML = `<span>GrammarGuard <span class="gg-count">${matches.length}</span></span>`;
-    const close = document.createElement('button');
-    close.className = 'gg-close';
-    close.textContent = '\xd7';
-    close.onclick = () => panel.remove();
-    head.appendChild(close);
-    panel.appendChild(head);
-
-    const fieldText = getText(field);
-    matches.forEach((m, i) => panel.appendChild(buildRow(m, i, field, matches, panel, fieldText)));
-    document.body.appendChild(panel);
-    placePanel(panel, field);
-
-    setTimeout(() => {
-      document.addEventListener('click', function oc(e) {
-        if (!panel.contains(e.target)) { panel.remove(); document.removeEventListener('click', oc); }
-      });
     }, 0);
   }
 
-  function buildRow(match, i, field, matches, panel, fieldText) {
-    const cls = getClass(match);
-    const col = { spelling:'#e53935', grammar:'#f57c00', style:'#1976d2' }[cls] || '#f57c00';
-    const sugs = (match.replacements || []).slice(0, 5).map(r => r.value);
-
-    const row = document.createElement('div');
-    row.className = 'gg-row';
-
-    // Top: dot + message + dismiss
-    const top = document.createElement('div');
-    top.className = 'gg-row-top';
-    const dot = document.createElement('span');
-    dot.className = 'gg-dot';
-    dot.style.background = col;
-    const msg = document.createElement('span');
-    msg.className = 'gg-msg';
-    msg.textContent = match.message;
-    const x = document.createElement('button');
-    x.className = 'gg-x';
-    x.textContent = '\u2715';
-    x.title = 'Dismiss';
-    x.onclick = () => dismissMatch(match, i, field, matches, panel, row);
-    top.append(dot, msg, x);
-    row.appendChild(top);
-
-    // Context snippet
-    if (match.context?.text) {
-      const co = match.context.offset || 0, cl2 = match.context.length || 0;
-      const ctx = document.createElement('div');
-      ctx.className = 'gg-ctx';
-      ctx.appendChild(document.createTextNode(match.context.text.slice(0, co)));
-      const mk = document.createElement('mark');
-      mk.style.cssText = `background:${col}22;color:${col}`;
-      mk.textContent = match.context.text.slice(co, co + cl2);
-      ctx.appendChild(mk);
-      ctx.appendChild(document.createTextNode(match.context.text.slice(co + cl2)));
-      row.appendChild(ctx);
+  function onInput(event) {
+    const element = getEditableTarget(event.target);
+    if (!element) {
+      return;
     }
 
-    // Suggestion buttons
-    if (sugs.length) {
-      const sw = document.createElement('div');
-      sw.className = 'gg-sugs';
-      sugs.forEach(sv => {
-        const btn = document.createElement('button');
-        btn.className = 'gg-sug';
-        btn.textContent = sv;
-        btn.onclick = () => { applyFix(field, match, sv, matches); panel.remove(); };
-        sw.appendChild(btn);
+    const session = getSession(element);
+    session.lastText = getEditableText(session);
+    clearRenderedMatches(session);
+    scheduleCheck(session, false);
+  }
+
+  function onClick(event) {
+    if (state.tooltip.contains(event.target)) {
+      return;
+    }
+
+    if (state.activeSession?.type === 'plain' && event.target === state.activeSession.element) {
+      const session = state.activeSession;
+      window.requestAnimationFrame(() => {
+        const position = session.element.selectionStart;
+        const match = findMatchAt(session.matches, position);
+        if (match) {
+          showMatchTooltip(session, match, event.clientX, event.clientY);
+        } else {
+          hideTooltip();
+        }
       });
-      row.appendChild(sw);
+      return;
     }
 
-    // Add to Dictionary (spelling only)
-    if (match.rule?.issueType === 'misspelling') {
-      const word = fieldText.slice(match.offset, match.offset + match.length).trim();
-      if (word) {
-        const dictBtn = document.createElement('button');
-        dictBtn.className = 'gg-dict-btn';
-        dictBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 12 12" fill="none" style="flex-shrink:0"><rect x="1" y="1" width="10" height="10" rx="2" stroke="currentColor" stroke-width="1.2"/><line x1="6" y1="3.5" x2="6" y2="8.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="3.5" y1="6" x2="8.5" y2="6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg> Add \u201c${word}\u201d to dictionary`;
-        dictBtn.onclick = () => {
-          dictionary.add(word.toLowerCase());
-          // Persist
-          chrome.storage.local.get(['personalDict'], d => {
-            const arr = Array.isArray(d.personalDict) ? d.personalDict : [];
-            if (!arr.includes(word.toLowerCase())) arr.push(word.toLowerCase());
-            chrome.storage.local.set({ personalDict: arr });
-          });
-          showToast(`\u201c${word}\u201d added to dictionary`);
-          dictBtn.textContent = '\u2713 Added';
-          dictBtn.disabled = true;
-          dictBtn.style.color = '#1a9e52';
-          // Remove all matches for this word from this field
-          for (let idx = matches.length - 1; idx >= 0; idx--) {
-            const m = matches[idx];
-            if (m.rule?.issueType === 'misspelling' &&
-                fieldText.slice(m.offset, m.offset + m.length) === word) {
-              matches.splice(idx, 1);
-            }
-          }
-          updateField(field, matches);
-          panel.querySelectorAll('.gg-row[data-word]').forEach(r => {
-            if (r.dataset.word === word) r.remove();
-          });
-          updatePanelCount(panel, matches);
-          if (!matches.length) setTimeout(() => panel.remove(), 600);
-        };
-        row.dataset.word = word;
-        row.appendChild(dictBtn);
+    const marker = event.target.closest('.gg-ce-mark');
+    if (marker && state.activeSession?.type === 'rich') {
+      const index = Number(marker.dataset.idx);
+      const match = state.activeSession.matches[index];
+      if (match) {
+        const rect = marker.getBoundingClientRect();
+        showMatchTooltip(state.activeSession, match, rect.left, rect.bottom + 8);
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+
+    if (!state.badge.contains(event.target)) {
+      hideTooltip();
+    }
+  }
+
+  function onDoubleClick(event) {
+    const session = state.activeSession;
+    if (!session) {
+      return;
+    }
+
+    if (session.type === 'plain' && event.target === session.element) {
+      window.requestAnimationFrame(() => {
+        const word = session.element.value.slice(session.element.selectionStart, session.element.selectionEnd).trim();
+        if (word) {
+          showSynonyms(session, word, event.clientX, event.clientY);
+        }
+      });
+      return;
+    }
+
+    if (session.type === 'rich' && session.element.contains(event.target)) {
+      const selection = window.getSelection();
+      const word = selection ? selection.toString().trim() : '';
+      if (word && !/\s/.test(word)) {
+        showSynonyms(session, word, event.clientX, event.clientY);
+      }
+    }
+  }
+
+  function onSelectionChange() {
+    if (state.activeSession?.type === 'plain') {
+      scheduleSync();
+    }
+  }
+
+  function getEditableTarget(node) {
+    if (!(node instanceof Element)) {
+      return null;
+    }
+
+    const direct = node.closest('textarea, input, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]');
+    if (!direct) {
+      return null;
+    }
+
+    if (direct instanceof HTMLTextAreaElement) {
+      return direct;
+    }
+
+    if (direct instanceof HTMLInputElement) {
+      const type = (direct.type || '').toLowerCase();
+      return EDITABLE_INPUT_TYPES.has(type) ? direct : null;
+    }
+
+    if (direct.isContentEditable) {
+      return direct;
+    }
+
+    return null;
+  }
+
+  function getSession(element) {
+    if (state.sessions.has(element)) {
+      return state.sessions.get(element);
+    }
+
+    const session = {
+      element,
+      type: element.isContentEditable ? 'rich' : 'plain',
+      timer: null,
+      matches: [],
+      renderedNodes: [],
+      lastText: getEditableText({ element, type: element.isContentEditable ? 'rich' : 'plain' }),
+      dictionary: new Set(state.settings.personalDict)
+    };
+
+    state.sessions.set(element, session);
+    return session;
+  }
+
+  function setActiveSession(session) {
+    state.activeSession = session;
+    scheduleSync();
+  }
+
+  function scheduleCheck(session, immediate) {
+    if (!session || !state.settings.enabled || isIgnoredSite()) {
+      return;
+    }
+
+    if (session.timer) {
+      clearTimeout(session.timer);
+    }
+
+    const delay = immediate ? 0 : Math.max(300, Number(state.settings.checkDelay) || 1500);
+    session.timer = window.setTimeout(() => runCheck(session, false), delay);
+  }
+
+  async function runCheck(session, fromManualTrigger) {
+    if (!session || !state.settings.enabled) {
+      return;
+    }
+
+    const text = getEditableText(session);
+    session.lastText = text;
+    if (text.trim().length < 3) {
+      session.matches = [];
+      clearRenderedMatches(session);
+      updateBadge(session);
+      return;
+    }
+
+    session.dictionary = new Set(state.settings.personalDict);
+    showBadge(session, 'Checking...');
+
+    try {
+      const response = await sendMessage({
+        action: 'checkTextChunked',
+        text,
+        language: state.settings.language,
+        settings: state.settings
+      });
+
+      const matches = (response.matches || []).filter(match => shouldKeepMatch(session, text, match));
+      session.matches = matches;
+      renderMatches(session, text);
+      updateBadge(session);
+
+      if (fromManualTrigger && !matches.length) {
+        showToast('No issues found in this field.');
+      }
+    } catch (error) {
+      showBadge(session, 'Retry');
+      if (fromManualTrigger || state.settings.showToasts) {
+        showToast(error.message || 'Check failed');
+      }
+    }
+  }
+
+  function shouldKeepMatch(session, text, match) {
+    if (match.rule?.issueType !== 'misspelling') {
+      return true;
+    }
+
+    const word = text.slice(match.offset, match.offset + match.length).toLowerCase().trim();
+    return !session.dictionary.has(word);
+  }
+
+  function renderMatches(session, text) {
+    hideTooltip();
+    if (session.type === 'plain') {
+      renderPlainMatches(session, text);
+      return;
+    }
+
+    renderRichMatches(session, text);
+  }
+
+  function renderPlainMatches(session, text) {
+    syncPlainOverlay(session);
+    const validMatches = [...session.matches]
+      .filter(match => isValidMatch(match, text.length))
+      .sort((left, right) => left.offset - right.offset);
+
+    let html = '';
+    let cursor = 0;
+    for (const match of validMatches) {
+      if (match.offset < cursor) {
+        continue;
+      }
+      html += escapeHtml(text.slice(cursor, match.offset));
+      html += `<mark class="gg-mark ${getIssueClass(match)}" data-offset="${match.offset}">${escapeHtml(text.slice(match.offset, match.offset + match.length))}</mark>`;
+      cursor = match.offset + match.length;
+    }
+    html += escapeHtml(text.slice(cursor));
+
+    state.overlayContent.innerHTML = html;
+
+  }
+
+  function renderRichMatches(session, text) {
+    clearRenderedMatches(session);
+    let textNodes = collectTextNodes(session.element);
+    const validMatches = [...session.matches]
+      .map((match, index) => ({ match, index }))
+      .filter(({ match }) => isValidMatch(match, text.length))
+      .sort((left, right) => right.match.offset - left.match.offset);
+
+    for (const { match, index } of validMatches) {
+      const start = locateRangeBoundary(textNodes, match.offset, false);
+      const end = locateRangeBoundary(textNodes, match.offset + match.length, true);
+      if (!start || !end) {
+        continue;
+      }
+
+      const range = document.createRange();
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+      if (range.collapsed) {
+        continue;
+      }
+
+      const extracted = range.extractContents();
+      const mark = document.createElement('span');
+      mark.className = `gg-ce-mark ${getIssueClass(match)}`;
+      mark.dataset.idx = String(index);
+      mark.appendChild(extracted);
+      range.insertNode(mark);
+      session.renderedNodes.push(mark);
+      textNodes = collectTextNodes(session.element);
+    }
+  }
+
+  function clearRenderedMatches(session) {
+    if (session.type === 'plain') {
+      state.overlayContent.innerHTML = '';
+      return;
+    }
+
+    for (const mark of session.renderedNodes.splice(0)) {
+      if (!mark.isConnected) {
+        continue;
+      }
+      const fragment = document.createDocumentFragment();
+      while (mark.firstChild) {
+        fragment.appendChild(mark.firstChild);
+      }
+      mark.replaceWith(fragment);
+    }
+    normalizeNode(session.element);
+  }
+
+  function syncPlainOverlay(session) {
+    if (!session || session.type !== 'plain') {
+      return;
+    }
+
+    const rect = session.element.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+      clearOverlay();
+      return;
+    }
+
+    const style = window.getComputedStyle(session.element);
+    state.overlay.classList.remove('hidden');
+    state.overlay.style.left = `${rect.left + window.scrollX}px`;
+    state.overlay.style.top = `${rect.top + window.scrollY}px`;
+    state.overlay.style.width = `${rect.width}px`;
+    state.overlay.style.height = `${rect.height}px`;
+    state.overlay.style.padding = style.padding;
+    state.overlay.style.font = style.font;
+    state.overlay.style.lineHeight = style.lineHeight;
+    state.overlay.style.letterSpacing = style.letterSpacing;
+    state.overlay.style.textAlign = style.textAlign;
+    state.overlay.style.whiteSpace = session.element instanceof HTMLInputElement ? 'pre' : 'pre-wrap';
+    state.overlay.style.wordBreak = 'break-word';
+    state.overlay.style.borderRadius = style.borderRadius;
+    state.overlay.scrollTop = session.element.scrollTop;
+    state.overlay.scrollLeft = session.element.scrollLeft;
+  }
+
+  function clearOverlay() {
+    state.overlay.classList.add('hidden');
+    state.overlayContent.innerHTML = '';
+  }
+
+  function updateBadge(session, customText) {
+    if (!session || !state.settings.showBadge) {
+      state.badge.classList.add('hidden');
+      return;
+    }
+
+    const rect = session.element.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+      state.badge.classList.add('hidden');
+      return;
+    }
+
+    const count = session.matches.length;
+    if (!customText && count === 0) {
+      state.badge.classList.add('hidden');
+      return;
+    }
+
+    state.badge.textContent = customText || `${count} issue${count === 1 ? '' : 's'}`;
+    state.badge.classList.remove('hidden');
+    state.badge.classList.toggle('has-issues', !customText && count > 0);
+    state.badge.style.left = `${rect.right + window.scrollX - 88}px`;
+    state.badge.style.top = `${rect.top + window.scrollY + 8}px`;
+  }
+
+  function showBadge(session, customText) {
+    updateBadge(session, customText);
+  }
+
+  async function showSynonyms(session, word, x, y) {
+    const clean = word.trim();
+    rememberSynonymTarget(session);
+    if (!clean || clean.length < 2) {
+      return;
+    }
+
+    showTooltip(x, y, `
+      <div class="gg-tip-head">
+        <span class="gg-tip-tag synonym">Synonyms</span>
+        <button type="button" class="gg-tip-close" data-close>Close</button>
+      </div>
+      <div class="gg-tip-body muted">Looking up <strong>${escapeHtml(clean)}</strong>...</div>
+    `);
+
+    try {
+      const response = await sendMessage({ action: 'fetchSynonyms', word: clean });
+      const synonyms = response.synonyms || [];
+      const chips = synonyms.length
+        ? synonyms.map(value => `<button type="button" class="gg-chip synonym" data-synonym="${escapeHtml(value)}">${escapeHtml(value)}</button>`).join('')
+        : '<div class="gg-tip-body muted">No synonyms found.</div>';
+
+      showTooltip(x, y, `
+        <div class="gg-tip-head">
+          <span class="gg-tip-tag synonym">${escapeHtml(clean)}</span>
+          <button type="button" class="gg-tip-close" data-close>Close</button>
+        </div>
+        <div class="gg-tip-body">
+          <div class="gg-tip-label">Choose a synonym</div>
+          <div class="gg-chip-row">${chips}</div>
+        </div>
+      `);
+
+      state.tooltip.querySelectorAll('[data-synonym]').forEach(button => {
+        button.addEventListener('mousedown', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          replaceSelectedWord(session, button.dataset.synonym || button.textContent || '');
+        });
+      });
+    } catch (error) {
+      showTooltip(x, y, `
+        <div class="gg-tip-head">
+          <span class="gg-tip-tag synonym">Synonyms</span>
+          <button type="button" class="gg-tip-close" data-close>Close</button>
+        </div>
+        <div class="gg-tip-body muted">Could not fetch synonyms.</div>
+      `);
+    }
+  }
+
+  function showMatchTooltip(session, match, x, y) {
+    const text = getEditableText(session);
+    const value = text.slice(match.offset, match.offset + match.length);
+    const suggestions = (match.replacements || []).slice(0, 6).map(item => item.value).filter(Boolean);
+    const actions = suggestions.length
+      ? suggestions.map(value => `<button type="button" class="gg-chip" data-replace="${escapeHtml(value)}">${escapeHtml(value)}</button>`).join('')
+      : '<div class="gg-tip-body muted">No suggestions available.</div>';
+    const dictionaryButton = match.rule?.issueType === 'misspelling'
+      ? `<button type="button" class="gg-secondary" data-dict="${escapeHtml(value)}">Add to dictionary</button>`
+      : '';
+
+    showTooltip(x, y, `
+      <div class="gg-tip-head">
+        <span class="gg-tip-tag ${getIssueClass(match)}">${escapeHtml(getIssueLabel(match))}</span>
+        <button type="button" class="gg-tip-close" data-close>Close</button>
+      </div>
+      <div class="gg-tip-body">${escapeHtml(match.message || 'Suggestion')}</div>
+      <div class="gg-tip-body">
+        <div class="gg-tip-label">Suggestions</div>
+        <div class="gg-chip-row">${actions}</div>
+      </div>
+      <div class="gg-tip-actions">
+        ${dictionaryButton}
+        <button type="button" class="gg-secondary" data-ignore="${match.offset}">Dismiss</button>
+      </div>
+    `);
+
+    state.tooltip.querySelectorAll('[data-replace]').forEach(button => {
+      button.addEventListener('click', () => applyReplacement(session, match, button.dataset.replace || ''));
+    });
+
+    const dictButton = state.tooltip.querySelector('[data-dict]');
+    if (dictButton) {
+      dictButton.addEventListener('click', () => addWordToDictionary(session, dictButton.dataset.dict || ''));
+    }
+
+    const dismissButton = state.tooltip.querySelector('[data-ignore]');
+    if (dismissButton) {
+      dismissButton.addEventListener('click', () => {
+        session.matches = session.matches.filter(item => item !== match);
+        renderMatches(session, getEditableText(session));
+        updateBadge(session);
+        hideTooltip();
+      });
+    }
+  }
+
+  function showTooltip(x, y, html) {
+    state.tooltip.innerHTML = html;
+    state.tooltip.classList.remove('hidden');
+    state.tooltip.style.left = `${x + window.scrollX}px`;
+    state.tooltip.style.top = `${y + window.scrollY}px`;
+
+    const closeButton = state.tooltip.querySelector('[data-close]');
+    if (closeButton) {
+      closeButton.addEventListener('click', hideTooltip);
+    }
+
+    const rect = state.tooltip.getBoundingClientRect();
+    if (rect.right > window.innerWidth - 12) {
+      state.tooltip.style.left = `${window.scrollX + window.innerWidth - rect.width - 12}px`;
+    }
+    if (rect.bottom > window.innerHeight - 12) {
+      state.tooltip.style.top = `${window.scrollY + window.innerHeight - rect.height - 12}px`;
+    }
+  }
+
+  function hideTooltip() {
+    state.tooltip.classList.add('hidden');
+    state.tooltip.innerHTML = '';
+  }
+
+  async function applyReplacement(session, match, replacement) {
+    if (session.type === 'plain') {
+      const element = session.element;
+      const value = element.value;
+      element.value = value.slice(0, match.offset) + replacement + value.slice(match.offset + match.length);
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+    } else {
+      replaceContentEditableRange(session, match.offset, match.length, replacement);
+      session.element.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    hideTooltip();
+    scheduleCheck(session, true);
+  }
+
+  function replaceSelectedWord(session, replacement) {
+    if (!replacement) {
+      return;
+    }
+
+    const target = state.synonymTarget;
+    if (!target || target.session !== session) {
+      return;
+    }
+
+    if (session.type === 'plain') {
+      const element = session.element;
+      const start = target.start;
+      const end = target.end;
+      if (!Number.isInteger(start) || !Number.isInteger(end) || end <= start) {
+        return;
+      }
+      const value = element.value;
+      element.value = value.slice(0, start) + replacement + value.slice(end);
+      element.focus();
+      element.setSelectionRange(start, start + replacement.length);
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+    } else {
+      const selection = window.getSelection();
+      if (!target.range) {
+        return;
+      }
+      const range = target.range.cloneRange();
+      range.deleteContents();
+      range.insertNode(document.createTextNode(replacement));
+      if (selection) {
+        selection.removeAllRanges();
+        const caret = document.createRange();
+        caret.setStart(range.endContainer, range.endOffset);
+        caret.collapse(true);
+        selection.addRange(caret);
+      }
+      session.element.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    state.synonymTarget = null;
+    hideTooltip();
+    scheduleCheck(session, true);
+  }
+
+  async function addWordToDictionary(session, word) {
+    const clean = word.toLowerCase().trim();
+    if (!clean) {
+      return;
+    }
+
+    await sendMessage({ action: 'addToDict', word: clean });
+    state.settings.personalDict = Array.from(new Set([...state.settings.personalDict, clean]));
+    session.dictionary = new Set(state.settings.personalDict);
+    session.matches = session.matches.filter(match => {
+      const text = getEditableText(session).slice(match.offset, match.offset + match.length).toLowerCase().trim();
+      return text !== clean;
+    });
+    renderMatches(session, getEditableText(session));
+    updateBadge(session);
+    hideTooltip();
+  }
+
+  function replaceContentEditableRange(session, startOffset, length, replacement) {
+    clearRenderedMatches(session);
+    const entries = collectTextNodes(session.element);
+    const start = locateRangeBoundary(entries, startOffset, false);
+    const end = locateRangeBoundary(entries, startOffset + length, true);
+    if (!start || !end) {
+      return;
+    }
+
+    const range = document.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    range.deleteContents();
+    range.insertNode(document.createTextNode(replacement));
+    normalizeNode(session.element);
+  }
+
+  function rememberSynonymTarget(session) {
+    if (session.type === 'plain') {
+      state.synonymTarget = {
+        session,
+        start: session.element.selectionStart,
+        end: session.element.selectionEnd
+      };
+      return;
+    }
+
+    const selection = window.getSelection();
+    state.synonymTarget = {
+      session,
+      range: selection && selection.rangeCount ? selection.getRangeAt(0).cloneRange() : null
+    };
+  }
+
+  function collectTextNodes(root) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.textContent) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        if (node.parentElement?.closest('.gg-tooltip')) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+
+    const entries = [];
+    let current = walker.nextNode();
+    let offset = 0;
+    while (current) {
+      const entry = {
+        node: current,
+        start: offset,
+        end: offset + current.textContent.length
+      };
+      entries.push(entry);
+      offset = entry.end;
+      current = walker.nextNode();
+    }
+    return entries;
+  }
+
+
+  function locateRangeBoundary(entries, absoluteOffset, isEnd) {
+    if (!entries.length) {
+      return null;
+    }
+
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
+      const localOffset = absoluteOffset - entry.start;
+
+      if (absoluteOffset < entry.end) {
+        return { node: entry.node, offset: Math.max(0, localOffset) };
+      }
+
+      if (absoluteOffset === entry.end) {
+        if (isEnd || index === entries.length - 1) {
+          return { node: entry.node, offset: entry.node.textContent.length };
+        }
       }
     }
 
-    return row;
+    const last = entries[entries.length - 1];
+    return { node: last.node, offset: last.node.textContent.length };
   }
 
-  function dismissMatch(match, i, field, matches, panel, row) {
-    matches.splice(i, 1);
-    updateField(field, matches);
-    row.remove();
-    updatePanelCount(panel, matches);
-    if (!matches.length) panel.remove();
+  function normalizeNode(node) {
+    node.normalize();
   }
 
-  function updateField(field, matches) {
-    state.get(field).matches = matches;
-    if (field._ggMirror) updateMirrorHTML(field._ggMirror, getText(field), matches);
-    else if (field.contentEditable === 'true') applyContentEditable(field, matches);
-    setBadge(field, matches.length > 0 ? 'errors' : 'ok', matches);
+  function findMatchAt(matches, offset) {
+    return matches.find(match => offset >= match.offset && offset < match.offset + match.length) || null;
   }
 
-  function updatePanelCount(panel, matches) {
-    const c = panel.querySelector('.gg-count');
-    if (c) c.textContent = matches.length;
+  function isValidMatch(match, textLength) {
+    return Number.isFinite(match.offset) && Number.isFinite(match.length) && match.offset >= 0 && match.length > 0 && match.offset + match.length <= textLength;
   }
 
-  function placePanel(panel, field) {
-    const r = field.getBoundingClientRect();
-    let top  = (window.innerHeight - r.bottom) > 300 ? r.bottom + 8 : r.top - 400;
-    let left = r.left;
-    if (left + 325 > window.innerWidth) left = window.innerWidth - 325;
-    panel.style.top  = Math.max(4, top)  + 'px';
-    panel.style.left = Math.max(4, left) + 'px';
+  function getIssueClass(match) {
+    const issueType = (match.rule?.issueType || '').toLowerCase();
+    const category = (match.rule?.category?.id || '').toLowerCase();
+    if (issueType === 'misspelling') return 'spelling';
+    if (issueType.includes('style') || category.includes('style')) return 'style';
+    return 'grammar';
   }
 
-  // ── Apply fix ─────────────────────────────────────────────────────
-  function applyFix(field, match, replacement, matches) {
-    if (field.tagName === 'TEXTAREA' || field.tagName === 'INPUT') {
-      const v = field.value;
-      field.value = v.slice(0, match.offset) + replacement + v.slice(match.offset + match.length);
-      field.dispatchEvent(new Event('input', { bubbles: true }));
-    } else {
-      // Strip highlights first so innerText is clean and matches offsets
-      field.querySelectorAll('.gg-hl').forEach(s => s.replaceWith(document.createTextNode(s.textContent)));
-      field.normalize();
-      const plain = field.innerText;
-      field.innerText = plain.slice(0, match.offset) + replacement + plain.slice(match.offset + match.length);
-      // Place caret after replacement
-      try {
-        const walker = document.createTreeWalker(field, NodeFilter.SHOW_TEXT);
-        let node, n = 0, target = match.offset + replacement.length;
-        while ((node = walker.nextNode())) {
-          const l = node.textContent.length;
-          if (n + l >= target) {
-            const range = document.createRange();
-            range.setStart(node, Math.min(target - n, l));
-            range.collapse(true);
-            const sel = window.getSelection();
-            sel.removeAllRanges();
-            sel.addRange(range);
-            break;
-          }
-          n += l;
-        }
-      } catch (_) {}
+  function getIssueLabel(match) {
+    const kind = getIssueClass(match);
+    if (kind === 'spelling') return 'Spelling';
+    if (kind === 'style') return 'Style';
+    return 'Grammar';
+  }
+
+  function getEditableText(session) {
+    if (session.type === 'plain') {
+      return session.element.value.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     }
 
-    const lenDiff = replacement.length - match.length;
-    const idx = matches.indexOf(match);
-    if (idx !== -1) matches.splice(idx, 1);
-    matches.forEach(m => { if (m.offset > match.offset) m.offset += lenDiff; });
-    updateField(field, matches);
-    showToast(`\u2713 \u201c${replacement}\u201d applied`);
+    return (session.element.textContent || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   }
 
-  // ── Blur re-check ─────────────────────────────────────────────────
-  function attachBlur(field) {
-    if (field._ggBlur) return;
-    field._ggBlur = true;
-    let t;
-    field.addEventListener('blur', () => {
-      clearTimeout(t);
-      t = setTimeout(async () => {
-        const text = getText(field).trim();
-        if (!state.has(field)) state.set(field, { matches: [], badge: null });
-        if (text.length < 10) { removeMirror(field); setBadge(field, 'none'); return; }
-        setBadge(field, 'checking');
-        try {
-          const raw = await bgCheck(text);
-          const matches = filterDict(raw, text);
-          state.get(field).matches = matches;
-          setBadge(field, matches.length > 0 ? 'errors' : 'ok', matches);
-          applyMirror(field, text, matches);
-        } catch (e) { setBadge(field, 'failed'); }
-      }, 600);
+  function scheduleSync() {
+    if (state.syncScheduled) {
+      return;
+    }
+
+    state.syncScheduled = true;
+    window.requestAnimationFrame(() => {
+      state.syncScheduled = false;
+      if (!state.activeSession) {
+        return;
+      }
+
+      if (state.activeSession.type === 'plain') {
+        syncPlainOverlay(state.activeSession);
+      }
+      updateBadge(state.activeSession);
     });
   }
 
-  // ── Toast ─────────────────────────────────────────────────────────
-  function showToast(msg) {
-    document.querySelectorAll('.gg-toast').forEach(t => t.remove());
-    const t = document.createElement('div');
-    t.className = 'gg-toast';
-    t.textContent = msg;
-    document.body.appendChild(t);
-    requestAnimationFrame(() => { t.style.opacity = '1'; t.style.transform = 'translateX(-50%) translateY(0)'; });
-    setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 3000);
+  function isIgnoredSite() {
+    const host = window.location.hostname.toLowerCase();
+    return state.settings.ignoredSites.some(site => host === site || host.endsWith(`.${site}`));
   }
 
-  // ── Messages from popup ───────────────────────────────────────────
-  chrome.runtime.onMessage.addListener((msg, _, sendResponse) => {
-    if (msg.action === 'clearHighlights') {
-      state.forEach((s, f) => { if (s.badge) s.badge.remove(); removeMirror(f); });
-      state.clear();
-      document.querySelectorAll('.gg-panel').forEach(p => p.remove());
-      sendResponse({ success: true });
+  function showToast(message) {
+    if (!state.settings.showToasts) {
+      return;
     }
-    if (msg.action === 'ping')   sendResponse({ alive: true });
-    if (msg.action === 'enable') { scanAll(); sendResponse({ success: true }); }
-    if (msg.action === 'disable') {
-      state.forEach((s, f) => { if (s.badge) s.badge.remove(); removeMirror(f); });
-      state.clear();
-      sendResponse({ success: true });
-    }
-    return true;
-  });
 
-  // ── Helpers ───────────────────────────────────────────────────────
-  function getClass(m) {
-    const it  = (m.rule?.issueType    || '').toLowerCase();
-    const cat = (m.rule?.category?.id || '').toLowerCase();
-    if (it === 'misspelling') return 'spelling';
-    if (it.includes('grammar') || cat.includes('grammar')) return 'grammar';
-    if (it.includes('style')   || cat.includes('style'))   return 'style';
-    return 'grammar';
+    const toast = document.createElement('div');
+    toast.className = 'gg-toast';
+    toast.textContent = message;
+    document.documentElement.appendChild(toast);
+    window.setTimeout(() => toast.classList.add('visible'), 10);
+    window.setTimeout(() => {
+      toast.classList.remove('visible');
+      window.setTimeout(() => toast.remove(), 180);
+    }, 2200);
   }
-  function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-  function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
+  async function loadSettings() {
+    const stored = await chrome.storage.local.get(null);
+    return {
+      enabled: stored.enabled !== false,
+      language: stored.language || 'auto',
+      autoCheck: stored.autoCheck !== false,
+      checkDelay: stored.checkDelay || 1500,
+      checkSpelling: stored.checkSpelling !== false,
+      checkGrammar: stored.checkGrammar !== false,
+      checkStyle: stored.checkStyle !== false,
+      checkPunctuation: stored.checkPunctuation !== false,
+      showBadge: stored.showBadge !== false,
+      showToasts: stored.showToasts !== false,
+      personalDict: Array.isArray(stored.personalDict) ? stored.personalDict : [],
+      ignoredSites: String(stored.ignoredSites || '')
+        .split('\n')
+        .map(site => site.trim().toLowerCase())
+        .filter(Boolean),
+      apiKey: stored.apiKey || '',
+      apiUsername: stored.apiUsername || ''
+    };
+  }
+
+  function sendMessage(payload) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(payload, response => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        if (!response) {
+          reject(new Error('No response from background worker.'));
+          return;
+        }
+        if (response.success === false) {
+          reject(new Error(response.error || 'Request failed.'));
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
+  function escapeHtml(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
 })();
+
+
+
+
+
+
+
+

@@ -11,6 +11,8 @@
   ],
   "host_permissions": [
     "https://api.languagetool.org/*",
+    "https://api.datamuse.com/*",
+    "https://api.dictionaryapi.dev/*",
     "<all_urls>"
   ],
   "background": {

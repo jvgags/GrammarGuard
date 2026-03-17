@@ -3,7 +3,7 @@
 const DEFAULTS = {
   enabled: true,
   language: 'auto',
-  autoCheck: false,
+  autoCheck: true,
   checkDelay: 1500,
   checkSpelling: true,
   checkGrammar: true,
@@ -97,3 +97,4 @@ function updateWordCount() {
   const count = val ? val.split('\n').filter(w => w.trim()).length : 0;
   document.getElementById('wordCount').textContent = `${count} word${count !== 1 ? 's' : ''}`;
 }
+

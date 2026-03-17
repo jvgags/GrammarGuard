@@ -1,494 +1,692 @@
-// popup.js — GrammarGuard Popup Controller
+// popup.js — GrammarGuard
 
-// State
-let allMatches = [];
+const $ = id => document.getElementById(id);
+
+let allMatches   = [];
 let activeFilter = 'all';
-let dismissedIds = new Set();
-
-// DOM refs
-const enableToggle   = document.getElementById('enableToggle');
-const languageSelect = document.getElementById('languageSelect');
-const checkBtn       = document.getElementById('checkBtn');
-const clearBtn       = document.getElementById('clearBtn');
-const settingsBtn    = document.getElementById('settingsBtn');
-const issuesList     = document.getElementById('issuesList');
-const emptyState     = document.getElementById('emptyState');
-const statsRow       = document.getElementById('statsRow');
-const filterTabs     = document.getElementById('filterTabs');
-const statErrors     = document.getElementById('statErrors');
-const statWarnings   = document.getElementById('statWarnings');
-const statStyle      = document.getElementById('statStyle');
-const statTotal      = document.getElementById('statTotal');
-
-const statusIdle     = document.getElementById('statusIdle');
-const statusChecking = document.getElementById('statusChecking');
-const statusOk       = document.getElementById('statusOk');
-const statusError    = document.getElementById('statusError');
-const statusErrorMsg = document.getElementById('statusErrorMsg');
+let language     = 'auto';
+let dictionary   = new Set();
+let activeTooltip = null; // currently open inline tooltip
+let currentSettings = {};
+let synonymSelection = null;
 
 // ── Init ──────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
-  await loadSettings();
-  loadCachedResults();
+  const stored = await chrome.storage.local.get(['language', 'personalDict', 'theme', 'editorText', 'checkSpelling', 'checkGrammar', 'checkStyle', 'checkPunctuation', 'apiKey', 'apiUsername']);
+  currentSettings = stored;
+  language = stored.language || 'en-US';
+  $('langSelect').value = language || 'en-US';
+  if (Array.isArray(stored.personalDict))
+    dictionary = new Set(stored.personalDict.map(w => w.toLowerCase().trim()));
+  applyTheme(stored.theme || 'light');
+
+  // Restore last editor text
+  if (stored.editorText) {
+    $('editor').value = stored.editorText;
+    updateCharCount();
+  }
+
   bindEvents();
+  setStatus('idle', 'Ready — paste text and click Check Now');
 });
 
-async function loadSettings() {
-  const data = await chrome.storage.local.get(['enabled', 'language', 'dismissedIds']);
-  enableToggle.checked = data.enabled !== false;
-  if (data.language) languageSelect.value = data.language;
-  if (data.dismissedIds) dismissedIds = new Set(data.dismissedIds);
-}
+// ── Events ────────────────────────────────────────────────────────────
+function bindEvents() {
+  $('langSelect').addEventListener('change', () => {
+    language = $('langSelect').value;
+    currentSettings.language = language;
+    chrome.storage.local.set({ language });
+  });
 
-function loadCachedResults() {
-  chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
-    if (!tabs[0]) return;
-    const cached = await chrome.storage.session.get(`results_${tabs[0].id}`);
-    const key = `results_${tabs[0].id}`;
-    if (cached[key]) {
-      allMatches = cached[key];
-      renderResults(allMatches);
+  // Theme buttons
+  document.querySelectorAll('.theme-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      applyTheme(btn.dataset.theme);
+      chrome.storage.local.set({ theme: btn.dataset.theme });
+    });
+  });
+
+  $('settingsLink').addEventListener('click', e => { e.preventDefault(); chrome.runtime.openOptionsPage(); });
+  $('checkBtn').addEventListener('click', runCheck);
+  $('clearBtn').addEventListener('click', clearAll);
+
+  $('clearTextBtn').addEventListener('click', () => {
+    $('editor').value = '';
+    $('mirror').innerHTML = '';
+    updateCharCount();
+    clearAll();
+    chrome.storage.local.remove('editorText');
+  });
+
+  $('editor').addEventListener('input', () => {
+    updateCharCount();
+    updateMirrorHL($('editor').value, allMatches);
+    saveEditorText();
+  });
+
+  $('editor').addEventListener('scroll', syncMirrorScroll);
+
+  // Re-sync mirror size on resize (scrollbar may appear/disappear)
+  new ResizeObserver(() => {
+    syncMirrorSize();
+    syncMirrorScroll();
+  }).observe($('editor'));
+
+  // Filter tabs
+  document.querySelectorAll('.fbtn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.fbtn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeFilter = btn.dataset.f;
+      renderIssues();
+    });
+  });
+
+  // Close tooltip on outside click
+  document.addEventListener('click', e => {
+    if (activeTooltip && !activeTooltip.contains(e.target)) closeTooltip();
+  });
+
+  // Click on textarea: browser sets selectionStart to clicked char position.
+  // We use that directly — no mirror hit-testing needed.
+  $('editor').addEventListener('click', onEditorClick);
+  $('editor').addEventListener('dblclick', onEditorDblClick);
+  $('editor').addEventListener('keyup', e => {
+    // Also trigger on keyboard navigation so tooltip closes when cursor moves away
+    if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(e.key)) {
+      closeTooltip();
     }
   });
 }
 
-function bindEvents() {
-  checkBtn.addEventListener('click', runCheck);
-  clearBtn.addEventListener('click', clearResults);
-  settingsBtn.addEventListener('click', () => chrome.runtime.openOptionsPage());
+function updateCharCount() {
+  $('charCount').textContent = `${$('editor').value.length} chars`;
+}
 
-  enableToggle.addEventListener('change', () => {
-    chrome.storage.local.set({ enabled: enableToggle.checked });
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      if (tabs[0]) {
-        chrome.tabs.sendMessage(tabs[0].id, {
-          action: enableToggle.checked ? 'enable' : 'disable'
-        }).catch(() => {});
-      }
-    });
-  });
-
-  languageSelect.addEventListener('change', () => {
-    chrome.storage.local.set({ language: languageSelect.value });
-  });
-
-  // Filter tabs
-  document.querySelectorAll('.tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
-      activeFilter = tab.dataset.filter;
-      renderResults(allMatches);
-    });
-  });
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  document.querySelectorAll('.theme-btn').forEach(b => b.classList.toggle('active', b.dataset.theme === theme));
 }
 
 // ── Check ─────────────────────────────────────────────────────────────
-const CHUNK_SIZE = 1500;      // chars per API request — well within free tier timeout
-const CHUNK_DELAY_MS = 700;   // pause between chunks to avoid rate limiting
-const MAX_TOTAL_CHARS = 9000; // cap total text to keep things snappy
-
 async function runCheck() {
-  if (!enableToggle.checked) {
-    showStatus('error', 'GrammarGuard is disabled for this page');
-    return;
-  }
+  const text = $('editor').value;
+  if (text.trim().length < 3) { setStatus('err', 'Please enter some text first'); return; }
 
-  showStatus('checking');
-  checkBtn.disabled = true;
+  setStatus('checking', 'Checking…');
+  $('checkBtn').disabled = true;
+  closeTooltip();
 
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab) throw new Error('No active tab');
-
-    // Extract focused/visible text from the page
-    let textResult;
-    try {
-      [textResult] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: extractPageText,
-      });
-    } catch (e) {
-      throw new Error('Cannot access this page (restricted URL)');
-    }
-
-    const fullText = textResult?.result?.trim();
-    if (!fullText || fullText.length < 5) {
-      throw new Error('No readable text found on this page');
-    }
-
-    const text = fullText.substring(0, MAX_TOTAL_CHARS);
-    const language = languageSelect.value === 'auto' ? 'auto' : languageSelect.value;
-
-    // Route ALL API calls through the background service worker.
-    // This avoids Edge/Firefox Tracking Prevention blocking fetch() in the popup.
-    updateCheckingStatus(1, 1);
-    allMatches = await new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage(
-        { action: 'checkTextChunked', text, language },
-        (response) => {
-          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
-          if (response && response.success) resolve(response.matches || []);
-          else reject(new Error((response && response.error) || 'Check failed'));
-        }
-      );
+    // Normalize line endings so offsets match between textarea and API
+    const normText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const raw = await bgCheck(normText.slice(0, 5600));
+    allMatches = raw.filter(m => {
+      if (m.rule?.issueType !== 'misspelling') return true;
+      const w = normText.slice(m.offset, m.offset + m.length).toLowerCase().trim();
+      return !dictionary.has(w);
     });
 
-    // Cache results
-    await chrome.storage.session.set({ [`results_${tab.id}`]: allMatches });
+    // Use normalized text for mirror so offsets stay consistent
+    updateMirrorHL(normText, allMatches);
+    // Also update editor value to normalized form silently
+    if (normText !== text) { $('editor').value = normText; }
 
-    // Send highlights to content script
-    chrome.tabs.sendMessage(tab.id, {
-      action: 'highlight',
-      matches: allMatches,
-      text: text
-    }).catch(() => {});
+    if (allMatches.length === 0) {
+      setStatus('ok', 'No issues found — great writing!');
+      hideStats();
+      $('emptyState').style.display = '';
+      $('emptyState').innerHTML = `<svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity=".15"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg><p style="color:var(--green);font-weight:600">No issues found!</p><p class="empty-sub">Your text looks great</p>`;
+    } else {
+      setStatus('idle', `Found ${allMatches.length} issue${allMatches.length !== 1 ? 's' : ''} — click underlined words to fix`);
+      renderStats();
+      renderIssues();
+    }
+  } catch (e) {
+    setStatus('err', e.message || 'Check failed');
+  } finally {
+    $('checkBtn').disabled = false;
+  }
+}
 
-    showStatus(allMatches.length === 0 ? 'ok' : 'idle');
-    renderResults(allMatches);
+function bgCheck(text) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      { action: 'checkTextChunked', text, language, settings: currentSettings },
+      r => {
+        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+        if (r && r.success) return resolve(r.matches || []);
+        reject(new Error((r && r.error) || 'No response from background'));
+      }
+    );
+  });
+}
+
+// ── Mirror underlines ─────────────────────────────────────────────────
+function updateMirrorHL(text, matches) {
+  // Sync mirror dimensions to textarea BEFORE rendering so word-wrap is identical
+  syncMirrorSize();
+
+  const len = text.length;
+  const valid = [...matches]
+    .filter(m => {
+      const o = Number(m.offset), l = Number(m.length);
+      return Number.isFinite(o) && Number.isFinite(l) && o >= 0 && l > 0 && o + l <= len;
+    })
+    .sort((a, b) => a.offset - b.offset);
+
+  let html = '', cursor = 0;
+  for (const m of valid) {
+    if (m.offset < cursor) continue;
+    html += esc(text.slice(cursor, m.offset));
+    const c  = getClass(m);
+    const mc = { spelling: 'sp', grammar: 'gr', style: 'st' }[c] || 'gr';
+    const idx = matches.indexOf(m);
+    html += `<mark class="${mc}" data-idx="${idx}">${esc(text.slice(m.offset, m.offset + m.length))}</mark>`;
+    cursor = m.offset + m.length;
+  }
+  html += esc(text.slice(cursor));
+  // No trailing ​ — it shifts character positions
+  $('mirror').innerHTML = html;
+  syncMirrorScroll();
+}
+
+// Copy textarea's exact pixel dimensions to the mirror so word-wrap is identical.
+// The textarea's scrollbar eats ~17px of width — we must exclude it.
+function syncMirrorSize() {
+  const ed = $('editor');
+  const mi = $('mirror');
+  const cs = window.getComputedStyle(ed);
+
+  // clientWidth excludes scrollbar; use it as mirror width
+  mi.style.width  = ed.clientWidth  + 'px';
+  mi.style.height = ed.clientHeight + 'px';
+
+  // Keep font properties in sync with computed values (handles theme changes)
+  mi.style.fontFamily    = cs.fontFamily;
+  mi.style.fontSize      = cs.fontSize;
+  mi.style.fontWeight    = cs.fontWeight;
+  mi.style.lineHeight    = cs.lineHeight;
+  mi.style.letterSpacing = cs.letterSpacing;
+  mi.style.wordSpacing   = cs.wordSpacing;
+  mi.style.padding       = cs.padding;
+  mi.style.paddingTop    = cs.paddingTop;
+  mi.style.paddingRight  = cs.paddingRight;
+  mi.style.paddingBottom = cs.paddingBottom;
+  mi.style.paddingLeft   = cs.paddingLeft;
+  mi.style.tabSize       = cs.tabSize;
+}
+
+function syncMirrorScroll() {
+  $('mirror').scrollTop  = $('editor').scrollTop;
+  $('mirror').scrollLeft = $('editor').scrollLeft;
+}
+
+// ── Click on textarea → find match at click position → tooltip ───────
+function onEditorClick(e) {
+  if (!allMatches.length) return;
+
+  // The browser moves textarea.selectionStart to the clicked character position.
+  // We use requestAnimationFrame to read it after the browser updates it.
+  requestAnimationFrame(() => {
+    const pos = $('editor').selectionStart;
+    if (pos === null || pos === undefined) return;
+
+    // Find a match that spans this character position
+    const match = allMatches.find(m => pos >= m.offset && pos < m.offset + m.length);
+    if (!match) { closeTooltip(); return; }
+
+    const idx = allMatches.indexOf(match);
+    closeTooltip();
+
+    // Position tooltip near the click point
+    showInlineTooltip(match, idx, e.clientX, e.clientY);
+    highlightIssueCard(idx);
+  });
+}
+
+// ── Double-click → synonym lookup ─────────────────────────────────────
+function onEditorDblClick(e) {
+  // Browser selects the word on dblclick — read it via selectionStart/End
+  requestAnimationFrame(async () => {
+    const ed    = $('editor');
+    const start = ed.selectionStart;
+    const end   = ed.selectionEnd;
+    if (end <= start) return;
+
+    const word = ed.value.slice(start, end).trim().toLowerCase();
+    if (!word || word.length < 2 || /\s/.test(word)) return;
+
+    // Don't show synonyms if this is already a grammar error click
+    // (single click handles that; dblclick is for synonyms on any word)
+    closeTooltip();
+    showSynonymTooltip(word, e.clientX, e.clientY);
+  });
+}
+
+async function showSynonymTooltip(word, clickX, clickY) {
+  synonymSelection = { start: $("editor").selectionStart, end: $("editor").selectionEnd };
+  const tip = $("inlineTooltip");
+  tip.classList.remove('hidden');
+
+  // Show loading state immediately
+  tip.innerHTML = `
+    <div class="tip-head">
+      <span class="tip-type syn">Synonyms</span>
+      <button class="tip-close" id="tipClose">✕</button>
+    </div>
+    <div class="tip-msg" style="display:flex;align-items:center;gap:8px">
+      <span class="tip-spinner"></span>
+      <span>Looking up <em>${esc(word)}</em>…</span>
+    </div>`;
+
+  positionTooltip(tip, clickX, clickY, 300, 80);
+  activeTooltip = tip;
+  $('tipClose').addEventListener('click', e => { e.stopPropagation(); closeTooltip(); });
+
+  try {
+    // Route through background to avoid tracking prevention
+    // Background returns a flat string array from Datamuse
+    const synonyms = await new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ action: 'fetchSynonyms', word }, r => {
+        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+        if (r && r.success) return resolve(r.synonyms || []);
+        reject(new Error(r?.error || 'Lookup failed'));
+      });
+    });
+
+    if (!synonyms.length) {
+      tip.innerHTML = `
+        <div class="tip-head">
+          <span class="tip-type syn">Synonyms</span>
+          <button class="tip-close" id="tipClose">✕</button>
+        </div>
+        <div class="tip-msg" style="padding:10px 14px;opacity:.7">No synonyms found for <em>${esc(word)}</em></div>`;
+      $('tipClose').addEventListener('click', e => { e.stopPropagation(); closeTooltip(); });
+      positionTooltip(tip, clickX, clickY, 260, 80);
+      return;
+    }
+
+    tip.innerHTML = `
+      <div class="tip-head">
+        <span class="tip-type syn">${esc(word)}</span>
+        <button class="tip-close" id="tipClose">✕</button>
+      </div>
+      <div class="tip-syn-section">
+        <div class="tip-syn-label">Synonyms — double-click to replace</div>
+        <div class="tip-sugs">${synonyms.map(s =>
+          `<button class="tip-sug tip-syn-btn" data-val="${esc(s)}">${esc(s)}</button>`
+        ).join('')}</div>
+      </div>`;
+
+    positionTooltip(tip, clickX, clickY, 320, 150);
+        $('tipClose').addEventListener('click', e => { e.stopPropagation(); closeTooltip(); });
+
+    tip.querySelectorAll('.tip-syn-btn').forEach(btn => {
+      btn.addEventListener('mousedown', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        replaceSynonym(btn.dataset.val || btn.textContent || '');
+        closeTooltip();
+      });
+    });
 
   } catch (err) {
-    console.error('[GrammarGuard]', err);
-    showStatus('error', err.message || 'Unknown error');
-  } finally {
-    checkBtn.disabled = false;
+    tip.innerHTML = `
+      <div class="tip-head">
+        <span class="tip-type syn">Synonyms</span>
+        <button class="tip-close" id="tipClose">✕</button>
+      </div>
+      <div class="tip-msg" style="opacity:.6">Could not fetch synonyms</div>`;
+    $('tipClose').addEventListener('click', e => { e.stopPropagation(); closeTooltip(); });
+    positionTooltip(tip, clickX, clickY, 280, 70);
   }
 }
 
-// API calls are handled by background.js via chrome.runtime.sendMessage
-// (checkChunk removed — no fetch() in popup or content scripts)
-
-// Split text into chunks at sentence boundaries where possible
-function splitIntoChunks(text, maxSize) {
-  if (text.length <= maxSize) return [text];
-
-  const chunks = [];
-  let start = 0;
-
-  while (start < text.length) {
-    let end = start + maxSize;
-    if (end >= text.length) {
-      chunks.push(text.substring(start));
-      break;
-    }
-
-    // Try to break at a sentence boundary (. ! ? followed by space)
-    let breakAt = -1;
-    for (let i = end; i > start + maxSize / 2; i--) {
-      if (/[.!?]/.test(text[i]) && (i + 1 >= text.length || text[i + 1] === ' ' || text[i + 1] === '\n')) {
-        breakAt = i + 1;
-        break;
-      }
-    }
-
-    // Fall back to word boundary
-    if (breakAt === -1) {
-      for (let i = end; i > start + maxSize / 2; i--) {
-        if (text[i] === ' ' || text[i] === '\n') {
-          breakAt = i + 1;
-          break;
-        }
-      }
-    }
-
-    if (breakAt === -1) breakAt = end; // hard cut
-
-    chunks.push(text.substring(start, breakAt));
-    start = breakAt;
-  }
-
-  return chunks.filter(c => c.trim().length > 0);
+function replaceSynonym(replacement) {
+  const ed = $('editor');
+  const start = synonymSelection?.start;
+  const end = synonymSelection?.end;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || end <= start) return;
+  const v = ed.value;
+  ed.value = v.slice(0, start) + replacement + v.slice(end);
+  ed.setSelectionRange(start, start + replacement.length);
+  ed.focus();
+  updateCharCount();
+  saveEditorText();
+  const diff = replacement.length - (end - start);
+  allMatches.forEach(m => { if (m.offset >= end) m.offset += diff; });
+  synonymSelection = null;
+  updateMirrorHL(ed.value, allMatches);
 }
 
-function updateCheckingStatus(current, total) {
-  const el = document.querySelector('#statusChecking span');
-  if (el) {
-    el.textContent = total > 1
-      ? `Checking… (${current}/${total} sections)`
-      : 'Checking grammar…';
-  }
+function positionTooltip(tip, clickX, clickY, tipW, tipH) {
+  let left = clickX;
+  let top  = clickY + 18;
+  if (left + tipW > window.innerWidth  - 10) left = window.innerWidth  - tipW - 10;
+  if (top  + tipH > window.innerHeight - 10) top  = clickY - tipH - 8;
+  if (left < 10) left = 10;
+  if (top  < 10) top  = 10;
+  tip.style.left  = left + 'px';
+  tip.style.top   = top  + 'px';
+  tip.style.width = tipW + 'px';
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+function showInlineTooltip(match, idx, clickX, clickY) {
+  const text = $('editor').value;
+  const word = text.slice(match.offset, match.offset + match.length);
+  const cls  = getClass(match);
+  const sugs = (match.replacements || []).slice(0, 6).map(r => r.value);
+  const typeLabel = { spelling: 'Spelling', grammar: 'Grammar', style: 'Style' }[cls] || 'Issue';
 
-// Injected into page — extracts visible, meaningful text only
-function extractPageText() {
-  const skipTags = new Set([
-    'SCRIPT','STYLE','NOSCRIPT','IFRAME','OBJECT','EMBED',
-    'CODE','PRE','NAV','FOOTER','HEADER','ASIDE'
-  ]);
+  const tip = $('inlineTooltip');
+  tip.classList.remove('hidden');
 
-  // Prefer focused editable element first
-  const active = document.activeElement;
-  if (active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT')) {
-    return active.value || '';
-  }
-  if (active && active.contentEditable === 'true') {
-    return active.innerText || '';
-  }
+  tip.innerHTML = `
+    <div class="tip-head">
+      <span class="tip-type ${cls.substring(0,2)}">${typeLabel}</span>
+      <button class="tip-close" id="tipClose">�</button>
+    </div>
+    <div class="tip-msg">${esc(match.message)}</div>
+    ${sugs.length
+      ? `<div class="tip-sugs">${sugs.map(s => `<button class="tip-sug" data-val="${esc(s)}">${esc(s)}</button>`).join('')}</div>`
+      : `<div style="padding:4px 12px 10px;font-size:12px;opacity:.5">No suggestions available</div>`}
+    <div class="tip-footer">
+      ${cls === 'spelling' ? `<button class="tip-dict" data-word="${esc(word)}">+ Add to dictionary</button>` : '<span></span>'}
+      <button class="tip-dismiss">Dismiss</button>
+    </div>`;
 
-  // Otherwise get main content area
-  const main = document.querySelector('main, article, [role="main"], .content, #content, #main') || document.body;
+  positionTooltip(tip, clickX, clickY, 280, 160);
+  activeTooltip = tip;
 
-  const walker = document.createTreeWalker(
-    main,
-    NodeFilter.SHOW_TEXT,
-    {
-      acceptNode(node) {
-        let el = node.parentElement;
-        while (el) {
-          if (skipTags.has(el.tagName)) return NodeFilter.FILTER_REJECT;
-          // Skip hidden elements
-          const style = window.getComputedStyle(el);
-          if (style.display === 'none' || style.visibility === 'hidden') return NodeFilter.FILTER_REJECT;
-          el = el.parentElement;
-        }
-        const txt = node.textContent.trim();
-        if (txt.length < 3) return NodeFilter.FILTER_REJECT;
-        return NodeFilter.FILTER_ACCEPT;
-      }
-    }
-  );
+  $('tipClose').addEventListener('click', e => { e.stopPropagation(); closeTooltip(); });
 
-  const parts = [];
-  let node;
-  while ((node = walker.nextNode())) {
-    const t = node.textContent.trim();
-    if (t) parts.push(t);
-  }
-
-  // Join with spaces, collapse whitespace
-  return parts.join(' ').replace(/\s+/g, ' ').trim();
-}
-
-// ── Render ────────────────────────────────────────────────────────────
-function renderResults(matches) {
-  // Filter by active tab and dismissed
-  const filtered = matches.filter(m => {
-    if (dismissedIds.has(getMatchId(m))) return false;
-    if (activeFilter === 'all') return true;
-    const cat = getCategoryKey(m);
-    return cat === activeFilter;
+  tip.querySelectorAll('.tip-sug').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      applyFix(match, btn.dataset.val || btn.textContent || '');
+      closeTooltip();
+    });
   });
 
-  // Update stats
-  const errors   = matches.filter(m => getIssueType(m) === 'error').length;
-  const warnings = matches.filter(m => getIssueType(m) === 'warning').length;
-  const style    = matches.filter(m => getIssueType(m) === 'style').length;
-
-  statErrors.textContent   = errors;
-  statWarnings.textContent = warnings;
-  statStyle.textContent    = style;
-  statTotal.textContent    = matches.length;
-
-  if (matches.length > 0) {
-    statsRow.classList.remove('hidden');
-    filterTabs.classList.remove('hidden');
-  } else {
-    statsRow.classList.add('hidden');
-    filterTabs.classList.add('hidden');
+  const dismissBtn = tip.querySelector('.tip-dismiss');
+  if (dismissBtn) {
+    dismissBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      allMatches = allMatches.filter(m => m !== match);
+      updateMirrorHL($('editor').value, allMatches);
+      renderStats();
+      renderIssues();
+      closeTooltip();
+      if (!allMatches.length) {
+        setStatus('ok', 'All issues resolved!');
+        hideStats();
+      }
+    });
   }
 
-  // Clear list
-  issuesList.innerHTML = '';
+  const dictBtn = tip.querySelector('.tip-dict');
+  if (dictBtn) {
+    dictBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      addWordToDict(dictBtn.dataset.word);
+      closeTooltip();
+    });
+  }
+}
+function closeTooltip() {
+  const tip = $('inlineTooltip');
+  if (tip) { tip.classList.add('hidden'); tip.innerHTML = ''; }
+  activeTooltip = null;
+  document.querySelectorAll('.issue-card.highlight').forEach(c => c.classList.remove('highlight'));
+}
 
-  if (filtered.length === 0) {
-    issuesList.appendChild(emptyState);
-    if (allMatches.length > 0) {
-      emptyState.querySelector('p').innerHTML = 'No issues in this category';
-    } else {
-      emptyState.querySelector('p').innerHTML = 'Run a check to see<br/>grammar &amp; spelling issues';
+function highlightIssueCard(matchIdx) {
+  document.querySelectorAll('#issuesList .issue-card').forEach(card => {
+    if (parseInt(card.dataset.idx) === matchIdx) {
+      card.classList.add('highlight');
+      card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
+  });
+}
+
+
+// ── Scroll editor to match + get coords ──────────────────────────────
+function scrollEditorToMatch(match) {
+  const ed     = $('editor');
+  const mirror = $('mirror');
+  const markEl = mirror.querySelector('mark[data-idx="' + allMatches.indexOf(match) + '"]');
+  if (!markEl) return;
+  const markRect   = markEl.getBoundingClientRect();
+  const mirrorRect = mirror.getBoundingClientRect();
+  const relTop = markRect.top - mirrorRect.top + mirror.scrollTop;
+  ed.scrollTop = Math.max(0, relTop - ed.clientHeight / 2 + markRect.height / 2);
+  syncMirrorScroll();
+}
+
+function getMatchCoords(match) {
+  const mirror = $('mirror');
+  const markEl = mirror.querySelector('mark[data-idx="' + allMatches.indexOf(match) + '"]');
+  if (!markEl) return null;
+  const r = markEl.getBoundingClientRect();
+  return { x: r.left, y: r.bottom + 6 };
+}
+
+// ── Stats ─────────────────────────────────────────────────────────────
+function renderStats() {
+  $('nErrors').textContent  = allMatches.filter(m => getClass(m) === 'spelling').length;
+  $('nGrammar').textContent = allMatches.filter(m => getClass(m) === 'grammar').length;
+  $('nStyle').textContent   = allMatches.filter(m => getClass(m) === 'style').length;
+  $('nTotal').textContent   = allMatches.length;
+  $('statsSection').style.display  = '';
+  $('filterSection').style.display = '';
+}
+
+function hideStats() {
+  $('statsSection').style.display  = 'none';
+  $('filterSection').style.display = 'none';
+}
+
+// ── Issues panel ──────────────────────────────────────────────────────
+function renderIssues() {
+  const list = $('issuesList');
+  $('emptyState').style.display = 'none';
+  list.innerHTML = '';
+
+  const text   = $('editor').value;
+  const shown  = allMatches
+    .map((m, i) => ({ m, i }))
+    .filter(({ m }) => activeFilter === 'all' || getClass(m) === activeFilter);
+
+  if (shown.length === 0) {
+    const d = document.createElement('div');
+    d.className = 'empty-state';
+    d.innerHTML = '<p>No issues in this category</p>';
+    list.appendChild(d);
     return;
   }
 
-  filtered.forEach((match, idx) => {
-    issuesList.appendChild(createIssueCard(match, idx));
-  });
+  shown.forEach(({ m, i }) => list.appendChild(buildCard(m, i, text)));
 }
 
-function createIssueCard(match, idx) {
-  const type = getIssueType(match);
+function buildCard(match, idx, text) {
+  const cls  = getClass(match);
+  const col  = { spelling: '#e53935', grammar: '#f57c00', style: '#1976d2' }[cls] || '#f57c00';
+  const sugs = (match.replacements || []).slice(0, 6).map(r => r.value);
+  const word = text.slice(match.offset, match.offset + match.length);
+  const ctx  = match.context?.text || '';
+  const co   = match.context?.offset || 0, cl = match.context?.length || 0;
+  const ctxH = esc(ctx.slice(0, co)) + `<mark>${esc(ctx.slice(co, co + cl))}</mark>` + esc(ctx.slice(co + cl));
+
   const card = document.createElement('div');
   card.className = 'issue-card';
-  card.dataset.id = getMatchId(match);
-
-  const dotClass = { error: 'dot-error', warning: 'dot-warning', style: 'dot-style' }[type] || 'dot-other';
-
-  // Build context snippet
-  const context = match.context?.text || '';
-  const ctxOffset = match.context?.offset || 0;
-  const ctxLen = match.context?.length || 0;
-  const before = escHtml(context.substring(0, ctxOffset));
-  const marked = escHtml(context.substring(ctxOffset, ctxOffset + ctxLen));
-  const after  = escHtml(context.substring(ctxOffset + ctxLen));
-  const ctxHtml = `${before}<mark>${marked}</mark>${after}`;
-
-  // Suggestions
-  const suggestions = (match.replacements || []).slice(0, 6).map(r => r.value);
+  card.dataset.idx = idx;
 
   card.innerHTML = `
-    <div class="issue-header">
-      <div class="issue-type-dot ${dotClass}"></div>
-      <div class="issue-main">
-        <div class="issue-rule">${escHtml(match.rule?.issueType || match.rule?.id || 'issue')}</div>
-        <div class="issue-message">${escHtml(match.message)}</div>
-        <div class="issue-context">${ctxHtml}</div>
+    <div class="issue-head">
+      <span class="issue-dot" style="background:${col}"></span>
+      <div class="issue-info">
+        <div class="issue-type">${esc(cls)}</div>
+        <div class="issue-msg">${esc(match.message)}</div>
+        ${ctx ? `<div class="issue-ctx">${ctxH}</div>` : ''}
       </div>
-      <svg class="issue-toggle" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-        <polyline points="6 9 12 15 18 9"/>
-      </svg>
+      <span class="chevron">▶</span>
     </div>
     <div class="issue-body">
-      <div class="suggestions-label">Suggestions</div>
-      <div class="suggestions-list">
-        ${suggestions.length > 0
-          ? suggestions.map(s => `<button class="suggestion-btn" data-value="${escHtml(s)}">${escHtml(s)}</button>`).join('')
-          : '<span class="no-suggestions">No suggestions available</span>'
-        }
+      ${sugs.length ? `
+        <div class="sug-label">Suggestions</div>
+        <div class="sug-list">${sugs.map(s =>
+          `<button class="sug-btn" data-val="${esc(s)}">${esc(s)}</button>`
+        ).join('')}</div>` : ''}
+      <div class="card-row">
+        ${cls === 'spelling' ? `<button class="dict-btn" data-word="${esc(word)}">+ Add to dictionary</button>` : ''}
+        <button class="dismiss-btn">Dismiss</button>
       </div>
-      <div class="issue-actions">
-        <button class="action-link dismiss">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
-          Dismiss
-        </button>
-        <button class="action-link more-info" data-url="${match.rule?.urls?.[0]?.value || ''}">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
-          </svg>
-          More info
-        </button>
-      </div>
-    </div>
-  `;
+    </div>`;
 
-  // Toggle body
-  const header = card.querySelector('.issue-header');
-  const body   = card.querySelector('.issue-body');
-  const toggle = card.querySelector('.issue-toggle');
-  header.addEventListener('click', () => {
+  card.querySelector('.issue-head').addEventListener('click', () => {
+    const body = card.querySelector('.issue-body');
+    const chev = card.querySelector('.chevron');
     const open = body.classList.toggle('open');
-    toggle.classList.toggle('open', open);
+    chev.classList.toggle('open', open);
+    // Scroll the editor to this word, then measure coords and show tooltip
+    closeTooltip();
+    scrollEditorToMatch(match);
+    // rAF x2: first frame scrolls, second frame mirrors update, third we measure
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const ed = $('editor');
+      ed.focus();
+      ed.setSelectionRange(match.offset, match.offset + match.length);
+      const coords = getMatchCoords(match);
+      const r = ed.getBoundingClientRect();
+      showInlineTooltip(match, idx, coords ? coords.x : r.left + 40, coords ? coords.y : r.top + 60);
+    }));
   });
 
-  // Dismiss
-  card.querySelector('.action-link.dismiss').addEventListener('click', (e) => {
-    e.stopPropagation();
-    const id = getMatchId(match);
-    dismissedIds.add(id);
-    chrome.storage.local.set({ dismissedIds: [...dismissedIds] });
-    card.style.animation = 'none';
-    card.style.opacity = '0';
-    card.style.transition = 'opacity .2s';
-    setTimeout(() => {
-      allMatches = allMatches.filter(m => getMatchId(m) !== id);
-      renderResults(allMatches);
-    }, 200);
-  });
-
-  // More info
-  const moreInfoBtn = card.querySelector('.action-link.more-info');
-  moreInfoBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const url = moreInfoBtn.dataset.url;
-    if (url) chrome.tabs.create({ url });
-    else chrome.tabs.create({ url: `https://languagetool.org/insights/post/grammar-checker/` });
-  });
-
-  // Apply suggestion
-  card.querySelectorAll('.suggestion-btn').forEach(btn => {
-    btn.addEventListener('click', (e) => {
+  card.querySelectorAll('.sug-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
       e.stopPropagation();
-      const value = btn.dataset.value;
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (tabs[0]) {
-          chrome.tabs.sendMessage(tabs[0].id, {
-            action: 'applyFix',
-            matchOffset: match.offset,
-            matchLength: match.length,
-            replacement: value
-          }).catch(() => {});
-        }
-      });
-      // Remove card
-      const id = getMatchId(match);
-      dismissedIds.add(id);
-      allMatches = allMatches.filter(m => getMatchId(m) !== id);
-      renderResults(allMatches);
+      applyFix(match, btn.dataset.val || btn.textContent || '');
+      card.remove();
     });
   });
+
+  card.querySelector('.dismiss-btn').addEventListener('click', e => {
+    e.stopPropagation();
+    allMatches = allMatches.filter(m => m !== match);
+    updateMirrorHL($('editor').value, allMatches);
+    renderStats();
+    renderIssues();
+    if (!allMatches.length) {
+      setStatus('ok', 'All issues resolved!');
+      hideStats();
+    }
+  });
+
+  const db = card.querySelector('.dict-btn');
+  if (db) {
+    db.addEventListener('click', e => {
+      e.stopPropagation();
+      addWordToDict(db.dataset.word.toLowerCase().trim());
+    });
+  }
 
   return card;
 }
 
-// ── Clear ─────────────────────────────────────────────────────────────
-function clearResults() {
-  allMatches = [];
-  dismissedIds.clear();
-  chrome.storage.local.set({ dismissedIds: [] });
-  statsRow.classList.add('hidden');
-  filterTabs.classList.add('hidden');
-  showStatus('idle');
-  issuesList.innerHTML = '';
-  issuesList.appendChild(emptyState);
-  emptyState.querySelector('p').innerHTML = 'Run a check to see<br/>grammar &amp; spelling issues';
+// ── Apply fix ─────────────────────────────────────────────────────────
+function applyFix(match, replacement) {
+  const ed   = $('editor');
+  const v    = ed.value;
+  ed.value   = v.slice(0, match.offset) + replacement + v.slice(match.offset + match.length);
+  const diff = replacement.length - match.length;
+  allMatches = allMatches.filter(m => m !== match);
+  allMatches.forEach(m => { if (m.offset > match.offset) m.offset += diff; });
+  updateMirrorHL(ed.value, allMatches);
+  updateCharCount();
+  renderStats();
+  renderIssues();
+  if (!allMatches.length) { setStatus('ok', 'All issues resolved!'); hideStats(); }
+}
 
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (tabs[0]) {
-      chrome.tabs.sendMessage(tabs[0].id, { action: 'clearHighlights' }).catch(() => {});
-      chrome.storage.session.remove(`results_${tabs[0].id}`);
-    }
+// ── Dictionary ────────────────────────────────────────────────────────
+function addWordToDict(word) {
+  const w = (word || '').toLowerCase().trim();
+  if (!w) return;
+  dictionary.add(w);
+  chrome.storage.local.get('personalDict', data => {
+    const arr = Array.isArray(data.personalDict) ? data.personalDict : [];
+    if (!arr.includes(w)) arr.push(w);
+    chrome.storage.local.set({ personalDict: arr });
   });
+  // Remove all misspelling matches for this word
+  allMatches = allMatches.filter(m => {
+    if (m.rule?.issueType !== 'misspelling') return true;
+    return $('editor').value.slice(m.offset, m.offset + m.length).toLowerCase().trim() !== w;
+  });
+  updateMirrorHL($('editor').value, allMatches);
+  renderStats();
+  renderIssues();
+  if (!allMatches.length) { setStatus('ok', 'All issues resolved!'); hideStats(); }
+}
+
+// ── Clear ─────────────────────────────────────────────────────────────
+function clearAll() {
+  allMatches = [];
+  closeTooltip();
+  $('mirror').innerHTML = '';
+  $('issuesList').innerHTML = '';
+  $('emptyState').style.display = '';
+  $('emptyState').innerHTML = `
+    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity=".15">
+      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+      <polyline points="14 2 14 8 20 8"/>
+      <line x1="16" y1="13" x2="8" y2="13"/>
+      <line x1="16" y1="17" x2="8" y2="17"/>
+    </svg>
+    <p>Paste text and click <strong>Check Now</strong></p>
+    <p class="empty-sub">Click any underlined word to see suggestions</p>`;
+  hideStats();
+  setStatus('idle', 'Ready — paste text and click Check Now');
 }
 
 // ── Status ────────────────────────────────────────────────────────────
-function showStatus(type, msg) {
-  statusIdle.classList.add('hidden');
-  statusChecking.classList.add('hidden');
-  statusOk.classList.add('hidden');
-  statusError.classList.add('hidden');
-  if (type === 'idle')     statusIdle.classList.remove('hidden');
-  if (type === 'checking') statusChecking.classList.remove('hidden');
-  if (type === 'ok')       statusOk.classList.remove('hidden');
-  if (type === 'error') {
-    statusError.classList.remove('hidden');
-    statusErrorMsg.textContent = msg || 'Unknown error';
+function setStatus(type, msg) {
+  const bar = $('statusBar');
+  bar.className = `status-${type}`;
+  if (type === 'checking') {
+    bar.innerHTML = `<div class="spinner"></div><span>${esc(msg || 'Checking…')}</span>`;
+  } else {
+    bar.innerHTML = `<span class="status-dot"></span><span>${esc(msg || '')}</span>`;
   }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────
-function getIssueType(match) {
-  const issueType = match.rule?.issueType?.toLowerCase() || '';
-  const cat = match.rule?.category?.id?.toLowerCase() || '';
-  if (issueType === 'misspelling' || cat === 'typos') return 'error';
-  if (issueType.includes('grammar') || cat.includes('grammar')) return 'error';
-  if (issueType.includes('style') || cat.includes('style') || cat.includes('redundancy')) return 'style';
-  if (issueType.includes('hint') || issueType.includes('suggestion')) return 'style';
-  return 'warning';
+// ── Settings persistence ─────────────────────────────────────────────
+let saveTimer = null;
+function saveEditorText() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    chrome.storage.local.set({ editorText: $('editor').value });
+  }, 800); // debounce 800ms so we don't write on every keystroke
 }
 
-function getCategoryKey(match) {
-  const issueType = match.rule?.issueType?.toLowerCase() || '';
-  if (issueType === 'misspelling') return 'misspelling';
-  const type = getIssueType(match);
-  if (type === 'error') return 'grammar';
-  if (type === 'style') return 'style';
+// ── Helpers ───────────────────────────────────────────────────────────
+function getClass(m) {
+  const it  = (m.rule?.issueType    || '').toLowerCase();
+  const cat = (m.rule?.category?.id || '').toLowerCase();
+  if (it === 'misspelling') return 'spelling';
+  if (it.includes('grammar') || cat.includes('grammar')) return 'grammar';
+  if (it.includes('style')   || cat.includes('style'))   return 'style';
   return 'grammar';
 }
 
-function getMatchId(match) {
-  return `${match.offset}_${match.length}_${match.rule?.id}`;
+function esc(s) {
+  return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-function escHtml(str) {
-  if (!str) return '';
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
+
+
+
+
+
+
