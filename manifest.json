@@ -25,7 +25,6 @@
     }
   ],
   "action": {
-    "default_popup": "popup.html",
     "default_title": "GrammarGuard",
     "default_icon": {
       "16": "icons/icon16.png",
