@@ -10,6 +10,7 @@ const DEFAULTS = {
   checkStyle: true,
   checkPunctuation: true,
   highlightStyle: 'underline',
+  inlineTheme: 'soft',
   showBadge: true,
   showToasts: true,
   personalDict: '',
@@ -28,6 +29,7 @@ const fields = {
   checkStyle:      { key: 'checkStyle',        type: 'checkbox' },
   checkPunctuation:{ key: 'checkPunctuation',  type: 'checkbox' },
   highlightStyle:  { key: 'highlightStyle',    type: 'select' },
+  inlineTheme:     { key: 'inlineTheme',       type: 'select' },
   showBadge:       { key: 'showBadge',         type: 'checkbox' },
   showToasts:      { key: 'showToasts',        type: 'checkbox' },
   personalDict:    { key: 'personalDict',      type: 'textarea' },
@@ -97,4 +99,6 @@ function updateWordCount() {
   const count = val ? val.split('\n').filter(w => w.trim()).length : 0;
   document.getElementById('wordCount').textContent = `${count} word${count !== 1 ? 's' : ''}`;
 }
+
+
 

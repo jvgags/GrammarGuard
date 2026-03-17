@@ -1,3 +1,44 @@
+.gg-overlay,
+.gg-badge,
+.gg-tooltip,
+.gg-toast {
+  --gg-surface: rgba(255, 255, 255, 0.98);
+  --gg-surface-strong: #ffffff;
+  --gg-text: #1f2937;
+  --gg-text-muted: rgba(31, 41, 55, 0.7);
+  --gg-border: rgba(148, 163, 184, 0.28);
+  --gg-shadow: 0 16px 40px rgba(148, 163, 184, 0.24);
+  --gg-accent-bg: #1f2937;
+  --gg-accent-text: #f8fafc;
+}
+
+.gg-overlay[data-gg-theme="paper"],
+.gg-badge[data-gg-theme="paper"],
+.gg-tooltip[data-gg-theme="paper"],
+.gg-toast[data-gg-theme="paper"] {
+  --gg-surface: rgba(255, 251, 245, 0.98);
+  --gg-surface-strong: #fffaf2;
+  --gg-text: #4b3b2a;
+  --gg-text-muted: rgba(75, 59, 42, 0.72);
+  --gg-border: rgba(191, 168, 138, 0.35);
+  --gg-shadow: 0 16px 36px rgba(191, 168, 138, 0.22);
+  --gg-accent-bg: #8a5a32;
+  --gg-accent-text: #fff9f2;
+}
+
+.gg-overlay[data-gg-theme="mint"],
+.gg-badge[data-gg-theme="mint"],
+.gg-tooltip[data-gg-theme="mint"],
+.gg-toast[data-gg-theme="mint"] {
+  --gg-surface: rgba(244, 255, 251, 0.98);
+  --gg-surface-strong: #f0fdf8;
+  --gg-text: #16423c;
+  --gg-text-muted: rgba(22, 66, 60, 0.72);
+  --gg-border: rgba(94, 234, 212, 0.3);
+  --gg-shadow: 0 16px 36px rgba(45, 212, 191, 0.18);
+  --gg-accent-bg: #0f766e;
+  --gg-accent-text: #ecfeff;
+}
 .gg-overlay {
   position: absolute;
   z-index: 2147483000;
@@ -63,19 +104,19 @@
 .gg-badge {
   position: absolute;
   z-index: 2147483001;
-  border: 1px solid rgba(31, 41, 55, 0.18);
+  border: 1px solid var(--gg-border);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.96);
-  color: #1f2937;
+  background: var(--gg-surface);
+  color: var(--gg-text);
   font: 600 12px/1.2 system-ui, sans-serif;
   padding: 6px 10px;
-  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.14);
+  box-shadow: 0 6px 16px rgba(148, 163, 184, 0.18);
   cursor: pointer;
 }
 
 .gg-badge.has-issues {
-  background: #111827;
-  color: #f9fafb;
+  background: var(--gg-accent-bg);
+  color: var(--gg-accent-text);
 }
 
 .gg-tooltip {
@@ -83,10 +124,11 @@
   z-index: 2147483002;
   width: 320px;
   max-width: calc(100vw - 24px);
-  background: #111827;
-  color: #f9fafb;
+  background: var(--gg-surface-strong);
+  color: var(--gg-text);
   border-radius: 14px;
-  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.28);
+  border: 1px solid var(--gg-border);
+  box-shadow: var(--gg-shadow);
   overflow: hidden;
   font: 13px/1.45 system-ui, sans-serif;
 }
@@ -97,7 +139,7 @@
   justify-content: space-between;
   gap: 12px;
   padding: 12px 14px 10px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--gg-border);
 }
 
 .gg-tip-tag {
@@ -132,7 +174,7 @@
   appearance: none;
   border: none;
   background: transparent;
-  color: rgba(249, 250, 251, 0.82);
+  color: var(--gg-text-muted);
   cursor: pointer;
   font: inherit;
 }
@@ -142,7 +184,7 @@
 }
 
 .gg-tip-body.muted {
-  color: rgba(249, 250, 251, 0.72);
+  color: var(--gg-text-muted);
   padding-bottom: 14px;
 }
 
@@ -151,7 +193,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: rgba(249, 250, 251, 0.55);
+  color: var(--gg-text-muted);
   margin-bottom: 8px;
 }
 
@@ -164,10 +206,10 @@
 
 .gg-chip {
   appearance: none;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--gg-border);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
-  color: #f9fafb;
+  background: var(--gg-surface);
+  color: var(--gg-text);
   padding: 6px 10px;
   cursor: pointer;
   font: 600 12px/1.2 system-ui, sans-serif;
@@ -175,7 +217,7 @@
 
 .gg-chip.synonym {
   border-color: rgba(16, 185, 129, 0.25);
-  background: rgba(16, 185, 129, 0.12);
+  background: rgba(16, 185, 129, 0.10);
 }
 
 .gg-tip-actions {
@@ -191,11 +233,11 @@
   right: 18px;
   bottom: 18px;
   z-index: 2147483003;
-  background: rgba(17, 24, 39, 0.96);
-  color: #f9fafb;
+  background: var(--gg-surface-strong);
+  color: var(--gg-text);
   border-radius: 12px;
   padding: 10px 14px;
-  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.2);
+  box-shadow: var(--gg-shadow);
   opacity: 0;
   transform: translateY(6px);
   transition: opacity 0.18s ease, transform 0.18s ease;
@@ -210,5 +252,8 @@
 .hidden {
   display: none !important;
 }
+
+
+
 
 

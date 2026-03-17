@@ -14,6 +14,7 @@
       checkPunctuation: true,
       showBadge: true,
       showToasts: true,
+      inlineTheme: 'soft',
       ignoredSites: []
     },
     activeSession: null,
@@ -64,6 +65,7 @@
     document.documentElement.appendChild(state.overlay);
     document.documentElement.appendChild(state.badge);
     document.documentElement.appendChild(state.tooltip);
+    applyInlineTheme();
   }
 
   function bindGlobalEvents() {
@@ -87,6 +89,7 @@
       if (needsReload) {
         loadSettings().then(settings => {
           state.settings = settings;
+          applyInlineTheme();
           if (state.activeSession) {
             state.activeSession.dictionary = new Set(settings.personalDict);
             scheduleSync();
@@ -844,6 +847,13 @@
     return state.settings.ignoredSites.some(site => host === site || host.endsWith(`.${site}`));
   }
 
+
+  function applyInlineTheme() {
+    const theme = state.settings.inlineTheme || 'soft';
+    if (state.overlay) state.overlay.dataset.ggTheme = theme;
+    if (state.badge) state.badge.dataset.ggTheme = theme;
+    if (state.tooltip) state.tooltip.dataset.ggTheme = theme;
+  }
   function showToast(message) {
     if (!state.settings.showToasts) {
       return;
@@ -851,6 +861,7 @@
 
     const toast = document.createElement('div');
     toast.className = 'gg-toast';
+    toast.dataset.ggTheme = state.settings.inlineTheme || 'soft';
     toast.textContent = message;
     document.documentElement.appendChild(toast);
     window.setTimeout(() => toast.classList.add('visible'), 10);
@@ -873,6 +884,7 @@
       checkPunctuation: stored.checkPunctuation !== false,
       showBadge: stored.showBadge !== false,
       showToasts: stored.showToasts !== false,
+      inlineTheme: stored.inlineTheme || 'soft',
       personalDict: Array.isArray(stored.personalDict) ? stored.personalDict : [],
       ignoredSites: String(stored.ignoredSites || '')
         .split('\n')
@@ -911,6 +923,9 @@
       .replace(/"/g, '&quot;');
   }
 })();
+
+
+
 
 
 
