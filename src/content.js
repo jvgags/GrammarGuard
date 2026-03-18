@@ -167,6 +167,7 @@
 
     const session = getSession(element);
     session.lastText = getEditableText(session);
+    session.hasChecked = false;
     clearRenderedMatches(session);
     scheduleCheck(session, false);
   }
@@ -275,6 +276,7 @@
       type: element.isContentEditable ? 'rich' : 'plain',
       timer: null,
       matches: [],
+      hasChecked: false,
       renderedNodes: [],
       lastText: getEditableText({ element, type: element.isContentEditable ? 'rich' : 'plain' }),
       dictionary: new Set(state.settings.personalDict)
@@ -311,6 +313,7 @@
     session.lastText = text;
     if (text.trim().length < 3) {
       session.matches = [];
+      session.hasChecked = false;
       clearRenderedMatches(session);
       updateBadge(session);
       return;
@@ -329,6 +332,7 @@
 
       const matches = (response.matches || []).filter(match => shouldKeepMatch(session, text, match));
       session.matches = matches;
+      session.hasChecked = true;
       renderMatches(session, text);
       updateBadge(session);
 
@@ -483,15 +487,24 @@
     }
 
     const count = session.matches.length;
-    if (!customText && count === 0) {
+    const isClean = !customText && session.hasChecked && count === 0;
+    if (!customText && !isClean && count === 0) {
       state.badge.classList.add('hidden');
       return;
     }
 
-    state.badge.textContent = customText || `${count} issue${count === 1 ? '' : 's'}`;
+    if (isClean) {
+      state.badge.innerHTML = '<span class="gg-badge-dot" aria-hidden="true"></span>';
+      state.badge.setAttribute('aria-label', 'No issues found');
+    } else {
+      state.badge.textContent = customText || `${count} issue${count === 1 ? '' : 's'}`;
+      state.badge.removeAttribute('aria-label');
+    }
+
     state.badge.classList.remove('hidden');
     state.badge.classList.toggle('has-issues', !customText && count > 0);
-    state.badge.style.left = `${rect.right + window.scrollX - 88}px`;
+    state.badge.classList.toggle('is-clean', isClean);
+    state.badge.style.left = `${rect.right + window.scrollX - (isClean ? 28 : 88)}px`;
     state.badge.style.top = `${rect.top + window.scrollY + 8}px`;
   }
 
@@ -923,6 +936,8 @@
       .replace(/"/g, '&quot;');
   }
 })();
+
+
 
 
 
