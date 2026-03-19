@@ -247,25 +247,18 @@ function onEditorClick(e) {
 
 // ── Double-click → synonym lookup ─────────────────────────────────────
 function onEditorDblClick(e) {
-  // Browser selects the word on dblclick — read it via selectionStart/End
   requestAnimationFrame(async () => {
-    const ed    = $('editor');
-    const start = ed.selectionStart;
-    const end   = ed.selectionEnd;
-    if (end <= start) return;
-
-    const word = ed.value.slice(start, end).trim().toLowerCase();
+    const ed = $('editor');
+    const selection = getTrimmedSynonymSelection(ed);
+    if (!selection) return;
+    const { start, end, word } = selection;
     if (!word || word.length < 2 || /\s/.test(word)) return;
-
-    // Don't show synonyms if this is already a grammar error click
-    // (single click handles that; dblclick is for synonyms on any word)
     closeTooltip();
-    showSynonymTooltip(word, e.clientX, e.clientY);
+    showSynonymTooltip(word, e.clientX, e.clientY, { start, end });
   });
 }
-
-async function showSynonymTooltip(word, clickX, clickY) {
-  synonymSelection = { start: $("editor").selectionStart, end: $("editor").selectionEnd };
+async function showSynonymTooltip(word, clickX, clickY, selection = null) {
+  synonymSelection = selection || getTrimmedSynonymSelection($('editor'));
   const tip = $("inlineTooltip");
   tip.classList.remove('hidden');
 
@@ -360,6 +353,29 @@ function replaceSynonym(replacement) {
   updateMirrorHL(ed.value, allMatches);
 }
 
+function getTrimmedSynonymSelection(editor) {
+  if (!editor) return null;
+  let start = editor.selectionStart;
+  let end = editor.selectionEnd;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || end <= start) {
+    return null;
+  }
+  const value = editor.value || '';
+  while (start < end && /\s/.test(value[start])) {
+    start += 1;
+  }
+  while (end > start && /\s/.test(value[end - 1])) {
+    end -= 1;
+  }
+  if (end <= start) {
+    return null;
+  }
+  return {
+    start,
+    end,
+    word: value.slice(start, end).toLowerCase()
+  };
+}
 function positionTooltip(tip, clickX, clickY, tipW, tipH) {
   let left = clickX;
   let top  = clickY + 18;
