@@ -58,6 +58,11 @@
         runCheck(state.activeSession, true);
       }
     });
+    state.badge.addEventListener('contextmenu', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      showSiteActions(event.clientX, event.clientY);
+    });
 
     state.tooltip = document.createElement('div');
     state.tooltip.className = 'gg-tooltip hidden';
@@ -630,9 +635,47 @@
     }
   }
 
+  function showSiteActions(x, y) {
+    const host = window.location.hostname.toLowerCase();
+    showTooltip(x, y, `
+      <div class="gg-tip-head">
+        <span class="gg-tip-tag synonym">Site</span>
+        <button type="button" class="gg-tip-close" data-close>Close</button>
+      </div>
+      <div class="gg-tip-body">
+        <div class="gg-tip-label">GrammarGuard controls</div>
+        <div class="gg-chip-row">
+          <button type="button" class="gg-chip" data-disable-site="true">Disable on ${escapeHtml(host)}</button>
+        </div>
+      </div>
+    `);
+
+    const disableButton = state.tooltip.querySelector('[data-disable-site]');
+    if (disableButton) {
+      disableButton.addEventListener('click', () => {
+        disableCurrentSite();
+      });
+    }
+  }
+
   function hideTooltip() {
     state.tooltip.classList.add('hidden');
     state.tooltip.innerHTML = '';
+  }
+
+  async function disableCurrentSite() {
+    const host = window.location.hostname.toLowerCase();
+    const ignoredSites = Array.from(new Set([...(state.settings.ignoredSites || []), host]));
+    await chrome.storage.local.set({ ignoredSites: ignoredSites.join('\n') });
+    state.settings.ignoredSites = ignoredSites;
+    hideTooltip();
+    clearOverlay();
+    state.badge.classList.add('hidden');
+    if (state.activeSession) {
+      clearRenderedMatches(state.activeSession);
+      state.activeSession = null;
+    }
+    showToast(`Disabled on ${host}`);
   }
 
   async function applyReplacement(session, match, replacement) {

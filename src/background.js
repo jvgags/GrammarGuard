@@ -177,6 +177,9 @@ async function checkSingle(text, options = {}) {
   if (enabledCategories.length) {
     body.append('enabledCategories', enabledCategories.join(','));
   }
+  if (options.pickyMode) {
+    body.append('level', 'picky');
+  }
   body.append('disabledRules', 'UNPAIRED_BRACKETS,UNPAIRED_QUOTES,EN_QUOTES,SMART_QUOTES,MULTIPLICATION_SIGN,DASH_RULE');
 
   if (options.username && options.apiKey) {
@@ -272,6 +275,7 @@ function buildCheckOptions(msg = {}) {
     checkPunctuation: settings.checkPunctuation !== false,
     checkSpelling: settings.checkSpelling !== false,
     checkStyle: settings.checkStyle !== false,
+    pickyMode: settings.pickyMode === true,
     language: msg.language || settings.language || 'auto',
     username: (settings.apiUsername || '').trim()
   };
